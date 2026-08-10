@@ -1,0 +1,7 @@
+# One proxy per line. Supported schemes:
+#   socks5://[user:pass@]host:port     (Tor's default = 127.0.0.1:9050)
+#   socks4://[user@]host:port
+#   http://[user:pass@]host:port
+socks5://127.0.0.1:9050
+http://127.0.0.1:8080
+socks5://user:secret@10.0.0.42:1080
