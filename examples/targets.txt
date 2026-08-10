@@ -1,0 +1,33 @@
+# Example targets file for batch testing
+# ======================================
+# One target URL per line. Blank lines and lines starting with # are ignored.
+#
+# Use this file to test multiple endpoints sequentially or in parallel.
+# Always ensure you have authorization to test all listed targets.
+
+# Example 1: Local development server
+http://localhost:8080
+http://localhost:8080/api/login
+http://localhost:8080/api/users
+
+# Example 2: Staging environment endpoints
+https://staging.example.com/
+https://staging.example.com/api/v1/endpoint
+https://staging.example.com/auth/login
+
+# Example 3: Test environment with different paths
+http://test-server.local:8080/
+http://test-server.local:8080/slow-endpoint
+http://test-server.local:8080/upload
+
+# Example 4: Multiple domains (all authorized)
+https://api.example.com/v1/resource
+https://api.example.com/v1/another-resource
+https://service.example.com/endpoint
+
+# Usage examples:
+# Test each target sequentially:
+# while read -r target; do torshammer -u "$target" -c 128 -d 30; done < targets.txt
+#
+# Test specific target from file:
+# torshammer -u $(head -n 1 targets.txt) -c 256 -d 60

