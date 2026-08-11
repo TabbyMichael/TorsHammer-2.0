@@ -28,21 +28,65 @@ class Config:
     duration: float = 0.0  # seconds; 0 == unlimited
     connect_timeout: float = 15.0
     ssl_verify: bool = True
+    max_errors: int = 0             # circuit breaker: exit after N consecutive errors
+    ramp_up: int = 0               # stagger worker starts (N per second, 0 = immediate)
 
     proxies: list[Proxy] | None = None
     rotate_proxies: bool = False
     proxy_max_failures: int = 3
 
     user_agents: list[str] = field(default_factory=list)
-    custom_headers: list[str] = field(default_factory=list)
-    method: str | None = None
-    randomize_path: bool = True
-    seed: int | None = None
-
+    custom_headers: dict[str, str] = field(default_factory=dict)
+    custom_body: bytes | None = None  # Custom POST body content
+    fail_under: int = 0  # Exit with error if peak active connections < N
+    fail_on_zero: bool = False  # Exit with error if zero connections opened
     stats_interval: float = 1.0
     json_output: bool = False
     quiet: bool = False
     verbose: int = 0
+
+    # Cached SSL context to avoid recreating for each connection
+    _cached_ssl_context: ssl.SSLContext | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Validate configuration parameters after initialization."""
+        # Validate timing parameters
+        if self.stats_interval <= 0:
+            raise ValueError("stats_interval must be greater than 0")
+        if self.delay_min < 0:
+            raise ValueError("delay_min must be non-negative")
+        if self.delay_max < 0:
+            raise ValueError("delay_max must be non-negative")
+        if self.delay_max < self.delay_min:
+            raise ValueError("delay_max must be greater than or equal to delay_min")
+
+        # Validate concurrency
+        if self.concurrency < 1:
+            raise ValueError("concurrency must be at least 1")
+
+        # Validate post length
+        if self.base_post_length < 1:
+            raise ValueError("base_post_length must be at least 1")
+
+        # Validate timeout
+        if self.connect_timeout <= 0:
+            raise ValueError("connect_timeout must be greater than 0")
+
+        # Validate duration
+        if self.duration < 0:
+            raise ValueError("duration must be non-negative")
+
+        # Validate max_errors
+        if self.max_errors < 0:
+            raise ValueError("max_errors must be non-negative")
+
+        # Validate ramp_up
+        if self.ramp_up < 0:
+            raise ValueError("ramp_up must be non-negative")
+
+        # Validate fail_under
+        if self.fail_under is not None and self.fail_under < 0:
+            raise ValueError("fail_under must be non-negative")
 
     @property
     def server_hostname(self) -> str | None:
@@ -73,12 +117,15 @@ class Config:
             raise ValueError("stats-interval must be positive")
 
     def ssl_context(self) -> ssl.SSLContext | None:
-        """Return a TLS context for HTTPS targets, else None."""
+        """Return a cached TLS context for HTTPS targets, else None."""
         if not self.secure:
             return None
-        if self.ssl_verify:
-            return ssl.create_default_context()
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        return ctx
+        if self._cached_ssl_context is None:
+            if self.ssl_verify:
+                self._cached_ssl_context = ssl.create_default_context()
+            else:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                self._cached_ssl_context = ctx
+        return self._cached_ssl_context

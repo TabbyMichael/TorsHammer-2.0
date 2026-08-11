@@ -52,27 +52,8 @@ def _random_header_name(name: str) -> str:
 
 
 def _path(config: Config) -> str:
-    if not config.randomize_path:
-        return config.path
-    delimiter = "&" if "?" in config.path else "?"
-    return f"{config.path}{delimiter}{_rand_token(8)}"
-
-
-def _merge_headers(base_headers: list[str], custom_headers: list[str]) -> list[str]:
-    """Merge custom headers into base headers.
-    
-    Custom headers are applied AFTER base headers so they can override defaults.
-    """
-    if not custom_headers:
-        return base_headers
-    override = {h.split(":", 1)[0].strip().lower(): h for h in custom_headers}
-    merged: list[str] = []
-    for header in base_headers:
-        name = header.split(":", 1)[0].strip().lower()
-        if name not in override:
-            merged.append(header)
-    merged.extend(custom_headers)
-    return merged
+    separator = "&" if "?" in config.path else "?"
+    return f"{config.path}{separator}{secrets.token_urlsafe(6)}"
 
 
 def _base_headers(config: Config, ua: str) -> list[str]:
@@ -97,15 +78,15 @@ def _base_headers(config: Config, ua: str) -> list[str]:
     if random.random() < 0.5:
         headers.append(f"X-Forwarded-For: {_rand_ip()}")
     if random.random() < 0.4:
-        headers.append(f"X-Trace-Id: {_rand_hex(6)}")
-    # Randomize header casing and order for each connection.
-    headers = [
-        f"{_random_header_name(h.split(':', 1)[0])}: {h.split(':', 1)[1].lstrip()}" for h in headers
-    ]
-    first, rest = headers[:1], headers[1:]
-    random.shuffle(rest)
-    headers = first + rest
-    return _merge_headers(headers, config.custom_headers)
+        headers.append(f"X-Trace-Id: {secrets.token_hex(6)}")
+
+    # Add custom headers (skip critical headers that shouldn't be overridden)
+    critical_headers = {"host", "user-agent", "connection"}
+    for name, value in config.custom_headers.items():
+        if name.lower() not in critical_headers:
+            headers.append(f"{name}: {value}")
+
+    return headers
 
 
 def _dribble(n: int = 1) -> bytes:
@@ -140,15 +121,26 @@ class Profile(ABC):
         ua: str,
         stats: Stats,
         stop: asyncio.Event,
-    ) -> None:
-        """Dribble the connection until ``stop`` fires or the profile ends."""
+    ) -> bool:
+        """Dribble the connection until ``stop`` fires or the profile ends.
+
+        Returns:
+            True if the profile completed successfully, False if interrupted by stop flag.
+        """
 
 
 class SlowPost(Profile):
     name = "slow-post"
 
     async def run(self, reader, writer, config, ua, stats, stop):
-        length = random.randint(config.base_post_length // 2, config.base_post_length)
+        # Use custom body if provided, otherwise generate random body
+        if config.custom_body:
+            body = config.custom_body
+            length = len(body)
+        else:
+            length = random.randint(config.base_post_length // 2, config.base_post_length)
+            body = None  # Will dribble random data
+
         headers = _base_headers(config, ua)
         headers.append("Content-Type: application/x-www-form-urlencoded")
         headers.append(f"Content-Length: {length}")
@@ -157,11 +149,23 @@ class SlowPost(Profile):
             f"{method} {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
         ).encode()
         await _write(writer, req, stats)
-        sent = 0
-        while not stop.is_set() and sent < length:
-            await _write(writer, _dribble(), stats)
-            sent += 1
-            await _halt(stop, config)
+
+        if body:
+            # Send custom body byte by byte
+            sent = 0
+            while not stop.is_set() and sent < length:
+                await _write(writer, body[sent:sent+1], stats)
+                sent += 1
+                await _halt(stop, config)
+        else:
+            # Send random dribble data
+            sent = 0
+            while not stop.is_set() and sent < length:
+                await _write(writer, _dribble(), stats)
+                sent += 1
+                await _halt(stop, config)
+
+        return not stop.is_set()  # True if completed, False if interrupted
 
 
 class SlowPostHeaders(Profile):
@@ -205,6 +209,7 @@ class SlowHeaders(Profile):
             value = _rand_hex(8)
             await _write(writer, f"{key}: {value}\r\n".encode(), stats)
             await _halt(stop, config)
+        return not stop.is_set()  # True if completed, False if interrupted
 
 
 class SlowRead(Profile):
@@ -226,13 +231,21 @@ class SlowRead(Profile):
                 break
             stats.bytes_received += len(chunk)
             await _halt(stop, config)
+        return not stop.is_set()  # True if completed, False if interrupted
 
 
 class Chunked(Profile):
     name = "chunked"
 
     async def run(self, reader, writer, config, ua, stats, stop):
-        length = random.randint(config.base_post_length // 2, config.base_post_length)
+        # Use custom body if provided, otherwise generate random body
+        if config.custom_body:
+            body = config.custom_body
+            length = len(body)
+        else:
+            length = random.randint(config.base_post_length // 2, config.base_post_length)
+            body = None  # Will dribble random data
+
         headers = _base_headers(config, ua)
         headers.append("Transfer-Encoding: chunked")
         headers.append("Content-Type: application/x-www-form-urlencoded")
@@ -241,13 +254,27 @@ class Chunked(Profile):
             f"{method} {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
         ).encode()
         await _write(writer, req, stats)
-        sent = 0
-        while not stop.is_set() and sent < length:
-            size = random.randint(1, 4)
-            payload = _dribble(size)
-            await _write(writer, f"{size:x}\r\n".encode() + payload + b"\r\n", stats)
-            sent += size
-            await _halt(stop, config)
+
+        if body:
+            # Send custom body in chunks
+            sent = 0
+            while not stop.is_set() and sent < length:
+                chunk_size = min(random.randint(1, 4), length - sent)
+                chunk = body[sent:sent + chunk_size]
+                await _write(writer, f"{chunk_size:x}\r\n".encode() + chunk + b"\r\n", stats)
+                sent += chunk_size
+                await _halt(stop, config)
+        else:
+            # Send random dribble data in chunks
+            sent = 0
+            while not stop.is_set() and sent < length:
+                size = random.randint(1, 4)
+                payload = _dribble(size)
+                await _write(writer, f"{size:x}\r\n".encode() + payload + b"\r\n", stats)
+                sent += size
+                await _halt(stop, config)
+
+        return not stop.is_set()  # True if completed, False if interrupted
 
 
 PROFILES: dict[str, type[Profile]] = {
