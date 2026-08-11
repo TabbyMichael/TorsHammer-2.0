@@ -47,3 +47,15 @@ def test_pool_round_robin():
 
 def test_pool_empty_returns_none():
     assert ProxyPool([]).next() is None
+
+
+def test_proxy_pool_removes_failed_proxy():
+    proxies = [Proxy("socks5", "a", 1), Proxy("socks5", "b", 2)]
+    pool = ProxyPool(proxies, rotate=False, max_failures=2)
+    proxy = pool.next()
+    assert proxy.host == "a"
+    pool.report_failure(proxy)
+    assert len(pool) == 2
+    pool.report_failure(proxy)
+    assert len(pool) == 1
+    assert pool.next().host == "b"
