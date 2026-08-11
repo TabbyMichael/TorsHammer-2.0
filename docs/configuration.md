@@ -493,7 +493,7 @@ config = Config(
     host="test.local",
     port=8080,
     concurrency=64,  # Start low
-    duration=30,     # Time-limited
+    duration=30,  # Time-limited
     delay_min=0.1,
     delay_max=1.0,
 )

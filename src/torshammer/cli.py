@@ -36,10 +36,7 @@ BANNER = """\
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="torshammer",
-        description=(
-            "Tor's Hammer %s - slow-requests DoS/Vulnerability testing tool."
-            % __version__
-        ),
+        description=f"Tor's Hammer {__version__} - slow-requests DoS/Vulnerability testing tool.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -49,22 +46,35 @@ def build_parser() -> argparse.ArgumentParser:
     target.add_argument("--host", help="Target hostname/IP (alternative to --url)")
     target.add_argument("-p", "--port", type=int, help="Remote port (default 80 or 443)")
     target.add_argument("--ssl", action="store_true", help="Use TLS (implied by an https:// URL)")
-    target.add_argument("--ssl-no-verify", action="store_true", help="Do not verify TLS certificates")
+    target.add_argument(
+        "--ssl-no-verify", action="store_true", help="Do not verify TLS certificates"
+    )
 
     attack = parser.add_argument_group("attack")
     attack.add_argument("-m", "--mode", choices=sorted(PROFILES), default="slow-post")
     attack.add_argument(
-        "-c", "--concurrency", "--threads", "-r", dest="concurrency", type=int, default=256,
+        "-c",
+        "--concurrency",
+        "--threads",
+        "-r",
+        dest="concurrency",
+        type=int,
+        default=256,
         help="Number of concurrent connections",
     )
     attack.add_argument("-dl", "--delay-min", type=float, default=0.1, metavar="SEC")
     attack.add_argument("-dh", "--delay-max", type=float, default=3.0, metavar="SEC")
     attack.add_argument(
-        "-d", "--duration", type=float, default=0.0,
+        "-d",
+        "--duration",
+        type=float,
+        default=0.0,
         help="Stop after N seconds (0 = unlimited)",
     )
     attack.add_argument(
-        "--post-length", type=int, default=4096,
+        "--post-length",
+        type=int,
+        default=4096,
         help="Baseline Content-Length for slow-post / chunked modes",
     )
     attack.add_argument("--connect-timeout", type=float, default=15.0, metavar="SEC")
@@ -78,7 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     proxy_group = parser.add_argument_group("proxy / Tor")
-    proxy_group.add_argument("--tor", action="store_true", help="Route via Tor SOCKS5 at 127.0.0.1:9050")
+    proxy_group.add_argument(
+        "--tor", action="store_true", help="Route via Tor SOCKS5 at 127.0.0.1:9050"
+    )
     proxy_group.add_argument("--proxy", help="Proxy URL, e.g. socks5://user:pass@host:9050")
     proxy_group.add_argument("--proxy-list", metavar="FILE", help="File with one proxy URL per line")
     proxy_group.add_argument("--proxy-env", metavar="VAR", help="Read proxy URL from environment variable")
@@ -86,7 +98,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     output = parser.add_argument_group("output")
     output.add_argument("--stats-interval", type=float, default=1.0, metavar="SEC")
-    output.add_argument("--json", action="store_true", dest="json_output", help="Emit newline-delimited JSON stats")
+    output.add_argument(
+        "--json", action="store_true", dest="json_output", help="Emit newline-delimited JSON stats"
+    )
     output.add_argument("-q", "--quiet", action="store_true", help="Suppress the live status line")
     output.add_argument("-v", "--verbose", action="count", default=0, help="Print per-error details")
     output.add_argument("--user-agents", metavar="FILE", help="File with one User-Agent string per line")
@@ -106,6 +120,22 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Exit with error if zero connections were opened")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
+
+
+def _parse_custom_headers(raw_headers: list[str]) -> list[str]:
+    headers: list[str] = []
+    for raw in raw_headers:
+        if ":" in raw:
+            name, value = raw.split(":", 1)
+        elif "=" in raw:
+            name, value = raw.split("=", 1)
+        else:
+            raise SystemExit(f"error: invalid header format: {raw!r}")
+        name = name.strip()
+        if not name:
+            raise SystemExit(f"error: invalid header name in: {raw!r}")
+        headers.append(f"{name}: {value.strip()}")
+    return headers
 
 
 def _resolve_config(args: argparse.Namespace) -> Config:
@@ -159,7 +189,8 @@ def _resolve_config(args: argparse.Namespace) -> Config:
     else:
         header_host = f"{host_for_header}:{port}"
 
-    return Config(
+    assert port is not None
+    config = Config(
         host=host,
         port=port,
         secure=secure,
@@ -177,6 +208,7 @@ def _resolve_config(args: argparse.Namespace) -> Config:
         ramp_up=args.ramp_up,
         proxies=_build_proxies(args),
         rotate_proxies=args.rotate_proxies,
+        proxy_max_failures=args.proxy_max_failures,
         user_agents=load_user_agents(args.user_agents),
         custom_headers=_build_custom_headers(args),
         custom_body=_load_custom_body(args.body_file),
@@ -187,9 +219,14 @@ def _resolve_config(args: argparse.Namespace) -> Config:
         quiet=args.quiet,
         verbose=args.verbose,
     )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise SystemExit(f"error: {exc}")
+    return config
 
 
-def _build_proxies(args: argparse.Namespace) -> list[Proxy] | None:
+def _build_proxies(args: argparse.Namespace, secure: bool) -> list[Proxy] | None:
     proxies: list[Proxy] = []
     if args.proxy:
         proxies.append(Proxy.from_url(args.proxy))
@@ -213,6 +250,23 @@ def _build_proxies(args: argparse.Namespace) -> list[Proxy] | None:
             raise SystemExit(f"error: cannot read proxy list: {exc}")
     if args.tor:
         proxies.insert(0, Proxy("socks5", "127.0.0.1", 9050))
+    if not proxies:
+        env_proxy = None
+        if secure:
+            env_proxy = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
+        else:
+            env_proxy = os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
+        env_proxy = env_proxy or os.getenv("ALL_PROXY") or os.getenv("all_proxy")
+        if env_proxy:
+            try:
+                proxies.append(Proxy.from_url(env_proxy))
+            except ValueError:
+                # Redact credentials before logging (security best practice)
+                redacted_url = re.sub(r'(://[^:]+:)[^@]+(@)', r'\1***\2', env_proxy)
+                print(
+                    f"  [warn] ignoring invalid proxy from environment: {redacted_url!r}",
+                    file=sys.stderr,
+                )
     return proxies or None
 
 
@@ -316,6 +370,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     config = _resolve_config(args)
+    if config.seed is not None:
+        random.seed(config.seed)
 
     # Check file descriptor limits before starting
     _check_fd_limits(config.concurrency)

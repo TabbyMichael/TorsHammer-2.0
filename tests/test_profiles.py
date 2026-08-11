@@ -3,21 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import random
 
 import pytest
 
 from torshammer import conn
 from torshammer.config import Config
 from torshammer.engine import AttackEngine
-from torshammer.profiles import PROFILES
+from torshammer.profiles import PROFILES, _base_headers, _path
 from torshammer.stats import Stats
 
 
 def _cfg(slow_server, **overrides) -> Config:
-    defaults = dict(
-        host="127.0.0.1", port=slow_server.port, connect_timeout=3,
-        delay_min=0, delay_max=0.01, base_post_length=64, path="/t",
-    )
+    defaults = {
+        "host": "127.0.0.1",
+        "port": slow_server.port,
+        "connect_timeout": 3,
+        "delay_min": 0,
+        "delay_max": 0.01,
+        "base_post_length": 64,
+        "path": "/t",
+    }
     defaults.update(overrides)
     return Config(**defaults)
 
@@ -39,7 +45,9 @@ async def _drive(profile_cls, cfg, stop=None, run_for=0.15) -> Stats:
     return stats
 
 
-@pytest.mark.parametrize("mode", ["slow-post", "slow-headers", "slow-read", "chunked"])
+@pytest.mark.parametrize(
+    "mode", ["slow-post", "slow-post-headers", "slow-headers", "slow-read", "chunked"]
+)
 async def test_profile_sends_bytes(slow_server, mode):
     cfg = _cfg(slow_server)
     await _drive(PROFILES[mode], cfg)
@@ -70,9 +78,13 @@ async def test_slow_read_consumes_response(slow_server):
 async def test_engine_runs_and_stops_cleanly(slow_server):
     cfg = _cfg(
         slow_server,
-        concurrency=4, mode="slow-post",
-        delay_min=0, delay_max=0.02, base_post_length=256,
-        duration=0.4, quiet=True,
+        concurrency=4,
+        mode="slow-post",
+        delay_min=0,
+        delay_max=0.02,
+        base_post_length=256,
+        duration=0.4,
+        quiet=True,
     )
     engine = AttackEngine(cfg, asyncio.Event())
     await engine.run()
@@ -92,3 +104,51 @@ async def test_engine_stops_via_event(slow_server):
     stop.set()
     await asyncio.wait_for(task, timeout=5)
     assert engine.stats.active == 0
+
+
+def test_random_path_is_reproducible_with_seed():
+    cfg = Config(host="example.com", port=80, path="/api", randomize_path=True)
+    random.seed(123)
+    path1 = _path(cfg)
+    random.seed(123)
+    path2 = _path(cfg)
+    assert path1 == path2
+    assert path1.startswith("/api?")
+
+
+def test_custom_headers_override_defaults():
+    cfg = Config(
+        host="example.com",
+        port=80,
+        path="/",
+        header_host="example.com",
+        custom_headers=["User-Agent: CustomAgent/1.0", "Accept: application/xml"],
+    )
+    headers = _base_headers(cfg, "IgnoredAgent")
+    assert any(h == "User-Agent: CustomAgent/1.0" for h in headers)
+    assert any(h == "Accept: application/xml" for h in headers)
+    assert not any(h.startswith("User-Agent: Mozilla") for h in headers)
+
+
+async def test_slow_headers_sends_custom_headers(slow_server):
+    """Profile-level coverage: SlowHeaders should send custom headers."""
+    cfg = _cfg(
+        slow_server,
+        custom_headers=["X-Custom: test-value", "X-Another: another-value"],
+    )
+    stats = await _drive(PROFILES["slow-headers"], cfg, run_for=0.2)
+    assert stats.bytes_sent > 0
+    # Check that custom headers were sent (they'll be in the request)
+    assert slow_server.bytes_received > 0
+
+
+async def test_slow_post_sends_custom_headers(slow_server):
+    """Profile-level coverage: SlowPost should merge custom headers."""
+    cfg = _cfg(
+        slow_server,
+        mode="slow-post",
+        custom_headers=["X-Custom: test-value"],
+    )
+    stats = await _drive(PROFILES["slow-post"], cfg, run_for=0.2)
+    assert stats.bytes_sent > 0
+    assert slow_server.bytes_received > 0

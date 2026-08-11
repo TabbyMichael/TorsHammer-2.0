@@ -209,6 +209,7 @@ pytest --cov=torshammer --cov-report=html
 ```python
 # tests/test_cli.py
 
+
 def test_new_option():
     """Test new CLI option."""
     args = build_parser().parse_args(["-u", "http://example.com", "--new-option"])

@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import ipaddress
-import ssl
 import struct
 
 from .config import Config
@@ -73,9 +72,9 @@ async def _handshake(reader, writer, proxy, host, port) -> None:
 async def _connect_socks5(reader, writer, proxy, host, port) -> None:
     # --- method negotiation ---
     if proxy.username is None:
-        writer.write(b"\x05\x01\x00")            # 1 method: no-auth
+        writer.write(b"\x05\x01\x00")  # 1 method: no-auth
     else:
-        writer.write(b"\x05\x02\x00\x02")        # 2 methods: no-auth, user/pass
+        writer.write(b"\x05\x02\x00\x02")  # 2 methods: no-auth, user/pass
     await writer.drain()
 
     ver, method = await reader.readexactly(2)
@@ -88,9 +87,7 @@ async def _connect_socks5(reader, writer, proxy, host, port) -> None:
         pwd = (proxy.password or "").encode()
         if len(user) > 255 or len(pwd) > 255:
             raise ProxyConnectError("SOCKS5 credentials too long")
-        writer.write(
-            b"\x01" + bytes([len(user)]) + user + bytes([len(pwd)]) + pwd
-        )
+        writer.write(b"\x01" + bytes([len(user)]) + user + bytes([len(pwd)]) + pwd)
         await writer.drain()
         ver2, status = await reader.readexactly(2)
         if ver2 != 1 or status != 0:
@@ -154,9 +151,7 @@ async def _connect_http(reader, writer, proxy, host, port) -> None:
     target = f"{host}:{port}"
     lines = [f"CONNECT {target} HTTP/1.1", f"Host: {target}"]
     if proxy.username is not None:
-        token = base64.b64encode(
-            f"{proxy.username}:{proxy.password or ''}".encode()
-        ).decode()
+        token = base64.b64encode(f"{proxy.username}:{proxy.password or ''}".encode()).decode()
         lines.append(f"Proxy-Authorization: Basic {token}")
     writer.write(("\r\n".join(lines) + "\r\n\r\n").encode())
     await writer.drain()

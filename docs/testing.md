@@ -188,9 +188,13 @@ async def test_direct_connect(slow_server):
 async def test_engine_runs_and_stops_cleanly(slow_server):
     cfg = _cfg(
         slow_server,
-        concurrency=4, mode="slow-post",
-        delay_min=0, delay_max=0.02, base_post_length=256,
-        duration=0.4, quiet=True,
+        concurrency=4,
+        mode="slow-post",
+        delay_min=0,
+        delay_max=0.02,
+        base_post_length=256,
+        duration=0.4,
+        quiet=True,
     )
     engine = AttackEngine(cfg, asyncio.Event())
     await engine.run()
@@ -238,12 +242,13 @@ def test_parse_socks5_with_credentials():
 ```python
 # tests/test_conn.py
 
+
 async def test_connection_timeout(slow_server):
     """Test that connection timeout is enforced."""
     cfg = Config(
         host="127.0.0.1",
         port=slow_server.port,
-        connect_timeout=0.001  # Very short timeout
+        connect_timeout=0.001,  # Very short timeout
     )
     with pytest.raises((asyncio.TimeoutError, ConnectionError)):
         await asyncio.sleep(0.1)  # Ensure timeout
@@ -254,6 +259,7 @@ async def test_connection_timeout(slow_server):
 
 ```python
 # tests/test_profiles.py
+
 
 @pytest.mark.parametrize("mode", ["slow-post", "slow-headers", "slow-read", "chunked"])
 async def test_profile_respects_config(slow_server, mode):

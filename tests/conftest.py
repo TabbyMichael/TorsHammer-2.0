@@ -33,13 +33,11 @@ class SlowServer:
                 if not data:
                     break
                 self.bytes_received += len(data)
-        except (asyncio.CancelledError, ConnectionError):
-            raise
         finally:
             self.active -= 1
             writer.close()
 
-    async def start(self) -> "SlowServer":
+    async def start(self) -> SlowServer:
         self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
         self.port = self.server.sockets[0].getsockname()[1]
         return self
@@ -80,12 +78,10 @@ class FakeSocks5:
                 data = await reader.read(4096)
                 if not data:
                     break
-        except (asyncio.IncompleteReadError, ConnectionError, asyncio.CancelledError):
-            raise
         finally:
             writer.close()
 
-    async def start(self) -> "FakeSocks5":
+    async def start(self) -> FakeSocks5:
         self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
         self.port = self.server.sockets[0].getsockname()[1]
         return self

@@ -49,7 +49,7 @@ class AttackEngine:
             if self.config.duration > 0:
                 try:
                     await asyncio.wait_for(self.stop.wait(), timeout=self.config.duration)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass  # time's up
             else:
                 await self.stop.wait()
@@ -85,6 +85,9 @@ class AttackEngine:
                 return
 
             proxy = self._pool.next() if self._pool else None
+            if self._pool is not None and proxy is None:
+                await asyncio.sleep(1.0)
+                continue
             ua = random.choice(config.user_agents) if config.user_agents else "Mozilla/5.0"
             writer = None
             try:
@@ -108,7 +111,13 @@ class AttackEngine:
                     self.stats.completed += 1
             except asyncio.CancelledError:
                 raise
-            except (ConnectionError, OSError, ssl.SSLError, asyncio.TimeoutError) as exc:
+            except (TimeoutError, ConnectionError, OSError, ssl.SSLError) as exc:
+                # Only report failures that are likely proxy-related
+                if proxy is not None and self._pool is not None:
+                    # Connection errors before establishing connection are often proxy issues
+                    # Timeout errors could be proxy or target
+                    if isinstance(exc, (ConnectionError, OSError)):
+                        self._pool.report_failure(proxy)
                 self.stats.errors += 1
                 consecutive_errors += 1
                 if config.verbose:
@@ -127,7 +136,7 @@ class AttackEngine:
                     try:
                         writer.close()
                         await writer.wait_closed()
-                    except Exception:
+                    except OSError:
                         pass
                     self.stats.active = max(0, self.stats.active - 1)
 
