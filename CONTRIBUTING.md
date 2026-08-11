@@ -310,7 +310,7 @@ Security-sensitive changes require:
 
 If you discover a security vulnerability:
 - Do not create a public issue
-- Follow [Security Policy](SECURITY.md) for reporting
+- Follow [Security Policy](docs/security.md) for reporting
 - Wait for coordinated disclosure
 
 ## Types of Contributions
@@ -389,7 +389,7 @@ Maintainers handle releases:
 4. Tag release
 5. Build distributions
 6. Publish to PyPI (if applicable)
-7. Create GitHub release
+7. Create Forgejo release
 
 ## Getting Help
 
@@ -401,7 +401,7 @@ Maintainers handle releases:
 
 ### Discussions
 
-- Use GitHub Discussions for broader topics
+- Use Forgejo Discussions for broader topics
 - Be respectful and constructive
 - Search existing discussions first
 
@@ -421,7 +421,7 @@ By contributing, you agree that your contributions will be licensed under the GP
 - [Development Guide](docs/development.md) - Development details
 - [Architecture Documentation](docs/architecture.md) - System design
 - [Testing Guide](docs/testing.md) - Test suite details
-- [Security Policy](SECURITY.md) - Security guidelines
+- [Security Policy](docs/security.md) - Security guidelines
 
 ## Contact
 

@@ -10,9 +10,9 @@ def human_size(n: float) -> str:
     value = float(n)
     for unit in ("B", "KB", "MB", "GB"):
         if value < 1024:
-            return f"{value:.1f} {unit}"
+            return f"{round(value, 1)} {unit}"
         value /= 1024.0
-    return f"{value:.1f} TB"
+    return f"{round(value, 1)} TB"
 
 
 @dataclass
@@ -27,3 +27,4 @@ class Stats:
     bytes_sent: int = 0
     bytes_received: int = 0
     start: float = field(default_factory=time.monotonic)
+    circuit_breaker: bool = False  # True if circuit breaker was triggered
