@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 DEFAULT_USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
@@ -21,10 +23,13 @@ def load_user_agents(path: str | None) -> list[str]:
     """Load one User-Agent string per line from ``path`` if given."""
     if not path:
         return list(DEFAULT_USER_AGENTS)
-    agents: list[str] = []
-    with open(path, encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if line and not line.startswith("#"):
-                agents.append(line)
-    return agents or list(DEFAULT_USER_AGENTS)
+    try:
+        agents: list[str] = []
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    agents.append(line)
+        return agents or list(DEFAULT_USER_AGENTS)
+    except OSError as exc:
+        raise SystemExit(f"error: cannot read user-agents file: {exc}")

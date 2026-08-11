@@ -164,9 +164,9 @@ For information on supported versions, see [SECURITY.md](SECURITY.md).
 
 ## Links
 
-- [Repository](https://github.com/yourusername/torshammer)
+- [Repository](https://github.com/TabbyMichael/TorsHammer-2.0)
 - [Documentation](docs/)
-- [Security Policy](SECURITY.md)
+- [Security Policy](docs/security.md)
 - [Contributing Guide](CONTRIBUTING.md)
 
-[2.0.0]: https://github.com/yourusername/torshammer/releases/tag/v2.0.0
+[2.0.0]: https://github.com/TabbyMichael/TorsHammer-2.0/releases/tag/v2.0.0

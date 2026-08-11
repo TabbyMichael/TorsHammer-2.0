@@ -90,6 +90,19 @@ For development:
 pip install -e ".[dev]"
 ```
 
+### Windows-Specific Considerations
+
+**High Concurrency on Windows:**
+- Windows uses the ProactorEventLoop by default, which handles high concurrency well
+- The older SelectorEventLoop had limitations (~512 sockets), but ProactorEventLoop does not
+- If you encounter issues, you may need to adjust your event loop policy
+- File descriptor limits are different on Windows; the tool will warn if concurrency is too high
+
+**Performance Tips:**
+- Start with lower concurrency (e.g., `-c 128`) and increase gradually
+- Monitor system resources during high-concurrency tests
+- Use `--duration` for time-limited tests to avoid uncontrolled resource usage
+
 ## Quick Start
 
 1. **Install the tool** (see Installation above)
@@ -106,8 +119,6 @@ thm | conns=256 open=256 done=12 err=0 | sent 45.2 KB @ 12.3 KB/s | recv 0.0 B |
 ```
 
 4. **Stop with Ctrl-C** when done
-
-## Usage
 
 ## Usage
 
@@ -349,31 +360,3 @@ GPL-2.0-or-later - See [LICENSE](LICENSE) for details.
 
 The original Tor's Hammer by e.c. / SourceForge project, and SocksiPy by
 Dan Haim that shipped with it.
-
-## Development
-
-```bash
-pip install -e ".[dev]"
-pytest                 # runs against a local demon server + fake SOCKS5 proxy
-python -m torshammer --help
-```
-
-Layout:
-
-```
-src/torshammer/
-  cli.py        argparse CLI + orchestration + signal handling
-  config.py     Config dataclass (all knobs)
-  engine.py     asyncio attack engine + Stats
-  profiles.py   the four attack vectors
-  conn.py       plain/TLS/socks5/socks4/http connect (pure stdlib)
-  proxies.py    proxy parsing + rotation
-  useragents.py UA list + file loader
-tests/          pytest suite (local server, fake SOCKS5, CLI parsing)
-legacy/         original 2011 Python-2 sources, kept for reference
-```
-
-## Acknowledgements
-
-The original Tor's Hammer by e.c. / SourceForge project, and SocksiPy by
-Dan Haim that shipped with it.# TorsHammer-2.0

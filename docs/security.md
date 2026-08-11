@@ -407,7 +407,76 @@ If you discover vulnerabilities using Torshammer 2.0:
 
 ## Security Policy
 
-For vulnerability reporting or security questions, see [SECURITY.md](../SECURITY.md).
+### Supported Versions
+
+Currently supported versions:
+
+| Version | Supported Until |
+|---------|----------------|
+| 2.0.0   | TBD            |
+
+Legacy versions (1.x) are not supported.
+
+### Reporting Vulnerabilities
+
+#### How to Report
+
+If you discover a security vulnerability in Torshammer 2.0, please report it responsibly.
+
+**Note:** This project does not currently have a designated security contact. Please report vulnerabilities via the Forgejo instance's issue tracker or contact the maintainers directly.
+
+#### What to Report
+
+Report vulnerabilities that could:
+
+- Allow unauthorized access to systems
+- Expose sensitive information
+- Allow privilege escalation
+- Bypass security controls
+- Cause denial of service (beyond intended functionality)
+
+#### What NOT to Report
+
+Do not report:
+
+- Intended functionality (slow-requests attacks are the purpose)
+- Issues requiring physical access
+- Issues in third-party dependencies
+- Issues in legacy code (1.x)
+- General security best practices
+
+#### Report Format
+
+Include the following information in your report:
+
+1. **Description:** Clear description of the vulnerability
+2. **Impact:** Potential impact of the vulnerability
+3. **Reproduction:** Steps to reproduce the issue
+4. **Proof of Concept:** Working example (if applicable)
+5. **Affected Versions:** Which versions are affected
+6. **Proposed Fix:** Suggested remediation (if known)
+
+#### Responsible Disclosure
+
+We follow responsible disclosure:
+
+1. **Acknowledgment:** We will acknowledge receipt within 7 days
+2. **Assessment:** We will assess the vulnerability within 14 days
+3. **Remediation:** We will aim to fix within 30 days
+4. **Disclosure:** Public disclosure after fix is released
+
+**Timeline may vary based on severity and complexity.**
+
+### Security Testing
+
+The project includes:
+
+- Unit tests for all components
+- Integration tests with local server
+- Proxy handshake tests
+- Attack profile tests
+
+**Note:** Version status has not been independently verified.
 
 ## References
 

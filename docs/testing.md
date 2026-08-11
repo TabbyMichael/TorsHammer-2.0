@@ -293,25 +293,67 @@ Each test should be independent:
 
 ## Continuous Integration
 
-**Note:** This project does not currently have CI/CD configuration.
+This project uses **Forgejo Actions** for continuous integration via a self-hosted Forgejo instance.
 
-To add CI, consider:
+**Workflow location:** `.forgejo/workflows/test.yml`
+
+The Forgejo Actions workflow runs automatically on:
+- Push to the `main` branch
+- Pull requests targeting the `main` branch
+
+**Workflow configuration:**
 
 ```yaml
-# .github/workflows/test.yml
-name: Tests
-on: [push, pull_request]
+# .forgejo/workflows/test.yml
+name: Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - run: pip install -e ".[dev]"
-      - run: pytest
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run tests
+        run: |
+          pytest
+
+      - name: Run ruff check
+        run: |
+          pip install ruff
+          ruff check .
+
+      - name: Run ruff format check
+        run: |
+          ruff format --check .
+
+      - name: Run mypy
+        run: |
+          pip install mypy
+          mypy src/
 ```
+
+**Note:** Forgejo reads workflows from `.forgejo/workflows/`. A `.github/workflows/` directory (used by GitHub.com) is not used by this project.
 
 ## Test Coverage
 

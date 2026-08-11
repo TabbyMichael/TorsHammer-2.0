@@ -8,13 +8,22 @@ dist/
 
 # Virtual environments
 .venv/
+.venv*/
 venv/
+venv_ci/
+test_venv/
+env/
+.env
 
 # Tooling
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 .coverage
 htmlcov/
+.pip-wheel-metadata/
+.cache/pip/
+.tox/
 
 # Editors / OS
 .DS_Store
@@ -23,3 +32,21 @@ htmlcov/
 
 # Logs
 *.log
+
+# Python packages
+*.whl
+*.tar.gz
+*.zip
+
+# Python dependencies
+requirements*.txt
+Pipfile.lock
+poetry.lock
+
+# Self-hosted Forgejo + runner runtime data (never commit)
+selfhost/forgejo-data/
+selfhost/forgejo-data-old.bak/
+selfhost/runner/
+selfhost/.env
+selfhost/.runner
+selfhost/config.yaml
