@@ -38,3 +38,4 @@ asyncio_mode = "auto"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+exclude = ["legacy", ".venv", "venv_ci", "test_venv"]

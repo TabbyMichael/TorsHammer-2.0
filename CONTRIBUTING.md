@@ -143,6 +143,7 @@ Type hints are required for all public functions:
 ```python
 from __future__ import annotations
 
+
 def example_function(param: str) -> int:
     return len(param)
 ```

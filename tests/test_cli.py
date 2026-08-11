@@ -34,7 +34,70 @@ def test_tor_flag_adds_socks5_proxy():
     args = build_parser().parse_args(["--url", "http://x.com", "--tor"])
     cfg = _resolve_config(args)
     assert cfg.proxies is not None
-    assert (cfg.proxies[0].scheme, cfg.proxies[0].host, cfg.proxies[0].port) == ("socks5", "127.0.0.1", 9050)
+    assert (cfg.proxies[0].scheme, cfg.proxies[0].host, cfg.proxies[0].port) == (
+        "socks5",
+        "127.0.0.1",
+        9050,
+    )
+
+
+def test_proxy_env_fallback(monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:8080")
+    args = build_parser().parse_args(["--url", "http://x.com"])
+    cfg = _resolve_config(args)
+    assert cfg.proxies is not None
+    assert cfg.proxies[0].scheme == "http"
+    assert cfg.proxies[0].host == "proxy.example"
+    assert cfg.proxies[0].port == 8080
+
+
+def test_parse_custom_headers_and_method():
+    args = build_parser().parse_args(
+        [
+            "--url",
+            "http://example.com",
+            "--path",
+            "/custom",
+            "--method",
+            "PUT",
+            "--header",
+            "X-Test: 1",
+            "--header",
+            "User-Agent: CustomAgent/1.0",
+        ]
+    )
+    cfg = _resolve_config(args)
+    assert cfg.method == "PUT"
+    assert cfg.path == "/custom"
+    assert "X-Test: 1" in cfg.custom_headers
+    assert "User-Agent: CustomAgent/1.0" in cfg.custom_headers
+
+
+def test_no_random_path():
+    args = build_parser().parse_args(["--url", "http://example.com/api", "--no-random-path"])
+    cfg = _resolve_config(args)
+    assert cfg.randomize_path is False
+    assert cfg.path == "/api"
+
+
+def test_invalid_header_format_raises():
+    parser = build_parser()
+    args = parser.parse_args(["--url", "http://example.com", "--header", "BadHeader"])
+    try:
+        _resolve_config(args)
+        raise AssertionError("should have failed")
+    except SystemExit:
+        pass
+
+
+def test_negative_delay_validation():
+    parser = build_parser()
+    args = parser.parse_args(["--url", "http://example.com", "-dl", "1.0", "-dh", "0.1"])
+    try:
+        _resolve_config(args)
+        raise AssertionError("should have failed")
+    except SystemExit:
+        pass
 
 
 def test_ssl_no_verify():

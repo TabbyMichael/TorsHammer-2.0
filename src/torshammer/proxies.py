@@ -20,14 +20,14 @@ _DEFAULT_PORTS = {"socks5": 1080, "socks4": 1080, "http": 8080}
 class Proxy:
     """A single configured proxy endpoint."""
 
-    scheme: str            # socks5 | socks4 | http
+    scheme: str  # socks5 | socks4 | http
     host: str
     port: int
     username: str | None = None
     password: str | None = None
 
     @classmethod
-    def from_url(cls, url: str) -> "Proxy":
+    def from_url(cls, url: str) -> Proxy:
         """Build a Proxy from a URL such as ``socks5://user:pass@host:port``.
 
         ``socks5://127.0.0.1:9050`` (Tor's default) is the common case.
@@ -63,17 +63,36 @@ class ProxyPool:
     returned round-robin.
     """
 
-    def __init__(self, proxies: list[Proxy] | None, rotate: bool = False):
+    def __init__(self, proxies: list[Proxy] | None, rotate: bool = False, max_failures: int = 3):
         self._proxies = proxies or []
-        self._cycle = itertools.cycle(self._proxies)
+        self._failures = [0] * len(self._proxies)
+        self._cycle = itertools.cycle(self._proxies) if self._proxies else None
         self._rotate = rotate
+        self._max_failures = max_failures
+
+    def _reset_cycle(self) -> None:
+        self._cycle = itertools.cycle(self._proxies) if self._proxies else None
 
     def next(self) -> Proxy | None:
         if not self._proxies:
             return None
         if self._rotate and len(self._proxies) > 1:
             return random.choice(self._proxies)
+        if self._cycle is None:
+            self._reset_cycle()
+        assert self._cycle is not None
         return next(self._cycle)
+
+    def report_failure(self, proxy: Proxy) -> None:
+        try:
+            idx = self._proxies.index(proxy)
+        except ValueError:
+            return
+        self._failures[idx] += 1
+        if self._failures[idx] >= self._max_failures:
+            del self._proxies[idx]
+            del self._failures[idx]
+            self._reset_cycle()
 
     def __len__(self) -> int:
         return len(self._proxies)

