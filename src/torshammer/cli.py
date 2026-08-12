@@ -22,15 +22,15 @@ from .proxies import Proxy
 from .stats import Stats, human_size
 from .useragents import load_user_agents
 
-BANNER = """\
-/*  Tor's Hammer {ver}
- *  Slow-requests DoS/Vulnerability testing tool (asyncio rewrite)
- *  Target: {target}   Mode: {mode}   Connections: {concurrency}
- *
- *  LEGAL: You may only use this against systems you own or are
- *  explicitly authorized to test. Unauthorized denial-of-service
- *  activity is illegal in most jurisdictions.
- */"""
+# Load a shared ASCII banner (assets/banner.txt) if present; fallback to a compact banner
+try:
+    _banner_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "assets", "banner.txt")
+    )
+    with open(_banner_path, encoding="utf-8") as _f:
+        BANNER = _f.read()
+except (OSError, UnicodeDecodeError):
+    BANNER = """  TorsHammer {VER} - slow-requests DoS/Vulnerability testing tool\n\nTarget : {TARGET}\nBackend : {BACKEND}\nMode   : {MODE}\nConns  : {CONCURRENCY}\n\n"""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -48,6 +48,22 @@ def build_parser() -> argparse.ArgumentParser:
     target.add_argument("--ssl", action="store_true", help="Use TLS (implied by an https:// URL)")
     target.add_argument(
         "--ssl-no-verify", action="store_true", help="Do not verify TLS certificates"
+    )
+    target.add_argument(
+        "--backend",
+        choices=["python", "rust"],
+        default="python",
+        help="Select the runtime backend; rust is an alternate high-performance implementation.",
+    )
+    target.add_argument(
+        "--allow-public-targets",
+        action="store_true",
+        help="Allow public internet targets; by default only loopback/private targets are permitted.",
+    )
+    target.add_argument(
+        "--allowlist-file",
+        metavar="FILE",
+        help="File with one hostname/IP per line that is allowed to be targeted.",
     )
 
     attack = parser.add_argument_group("attack")
@@ -122,6 +138,47 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _load_allowlist(path: str) -> set[str]:
+    allowed: set[str] = set()
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            entry = line.strip()
+            if not entry or entry.startswith("#"):
+                continue
+            allowed.add(entry.lower())
+    return allowed
+
+
+def _is_private_or_local_target(host: str) -> bool:
+    host = host.strip().lower()
+    if not host or host in {"localhost"} or host.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def _check_target_policy(host: str, *, allow_public_targets: bool, allowlist: set[str]) -> None:
+    normalized = host.strip().lower()
+    if normalized in allowlist:
+        return
+    if allow_public_targets or _is_private_or_local_target(normalized):
+        return
+    raise SystemExit(
+        "error: refusing to target a public host by default. "
+        "Use --allow-public-targets or --allowlist-file to confirm explicit authorization."
+    )
+
+
 def _parse_custom_headers(raw_headers: list[str]) -> list[str]:
     headers: list[str] = []
     for raw in raw_headers:
@@ -167,6 +224,18 @@ def _resolve_config(args: argparse.Namespace) -> Config:
     if host is None:
         raise SystemExit("error: a target is required (use --url or --host)")
 
+    allowlist = set()
+    if args.allowlist_file:
+        try:
+            allowlist = _load_allowlist(args.allowlist_file)
+        except OSError as exc:
+            raise SystemExit(f"error: cannot read allowlist file: {exc}") from exc
+    _check_target_policy(
+        host,
+        allow_public_targets=args.allow_public_targets,
+        allowlist=allowlist,
+    )
+
     if args.port and url:
         port = args.port
     if args.ssl:
@@ -198,6 +267,7 @@ def _resolve_config(args: argparse.Namespace) -> Config:
         header_host=header_host,
         concurrency=max(1, args.concurrency),
         mode=args.mode,
+        backend=args.backend,
         base_post_length=max(1, args.post_length),
         delay_min=args.delay_min,
         delay_max=args.delay_max,
@@ -209,6 +279,8 @@ def _resolve_config(args: argparse.Namespace) -> Config:
         proxies=_build_proxies(args),
         rotate_proxies=args.rotate_proxies,
         proxy_max_failures=args.proxy_max_failures,
+        allow_public_targets=args.allow_public_targets,
+        allowed_targets=allowlist,
         user_agents=load_user_agents(args.user_agents),
         custom_headers=_build_custom_headers(args),
         custom_body=_load_custom_body(args.body_file),
@@ -262,7 +334,7 @@ def _build_proxies(args: argparse.Namespace, secure: bool) -> list[Proxy] | None
                 proxies.append(Proxy.from_url(env_proxy))
             except ValueError:
                 # Redact credentials before logging (security best practice)
-                redacted_url = re.sub(r'(://[^:]+:)[^@]+(@)', r'\1***\2', env_proxy)
+                redacted_url = re.sub(r"(://[^:]+:)[^@]+(@)", r"\1***\2", env_proxy)
                 print(
                     f"  [warn] ignoring invalid proxy from environment: {redacted_url!r}",
                     file=sys.stderr,

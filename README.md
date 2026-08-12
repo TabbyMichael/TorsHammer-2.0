@@ -132,6 +132,8 @@ torshammer -u http://example.com -m slow-read -d 300 --json > stats.log
 
 The original flags still work: `-t <host> -r <threads> -p <port> -T`.
 
+By default the tool refuses to target public internet hosts unless the operator explicitly opts in with `--allow-public-targets` or a `--allowlist-file`. This is a built-in safety guardrail meant to reduce accidental misuse against third-party systems.
+
 ### Options
 
 | Flag | Meaning | Default |
@@ -146,6 +148,9 @@ The original flags still work: `-t <host> -r <threads> -p <port> -T`.
 | `--proxy` / `--proxy-list` | Single proxy URL / file of proxy URLs | none |
 | `--rotate-proxies` | Random proxy per connection | off |
 | `--ssl-no-verify` | Skip TLS certificate validation | off |
+| `--backend` | Choose runtime backend: `python` or `rust` | python |
+| `--allow-public-targets` | Permit public internet targets (explicit authorization required) | off |
+| `--allowlist-file` | File of allowed hostnames / IPs; entries are always permitted | none |
 | `--json` | Newline-delimited JSON stats | off |
 | `-q / -v` | Quiet / verbose | - |
 

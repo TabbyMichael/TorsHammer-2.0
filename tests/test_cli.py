@@ -6,7 +6,9 @@ from torshammer.cli import _resolve_config, build_parser
 
 
 def test_parse_https_url():
-    args = build_parser().parse_args(["-u", "https://example.com/api?x=1", "-c", "512"])
+    args = build_parser().parse_args(
+        ["-u", "https://example.com/api?x=1", "-c", "512", "--allow-public-targets"]
+    )
     cfg = _resolve_config(args)
     assert cfg.host == "example.com"
     assert cfg.port == 443
@@ -16,12 +18,55 @@ def test_parse_https_url():
     assert cfg.header_host == "example.com"
 
 
+def test_public_targets_are_blocked_by_default():
+    parser = build_parser()
+    args = parser.parse_args(["--url", "http://example.com"])
+    try:
+        _resolve_config(args)
+        raise AssertionError("should have failed")
+    except SystemExit:
+        pass
+
+
+def test_public_targets_allowed_explicitly():
+    args = build_parser().parse_args(["--url", "http://example.com", "--allow-public-targets"])
+    cfg = _resolve_config(args)
+    assert cfg.host == "example.com"
+    assert cfg.allow_public_targets is True
+
+
+def test_public_target_allowed_via_allowlist(tmp_path):
+    allowlist = tmp_path / "allowlist.txt"
+    allowlist.write_text("example.com\n", encoding="utf-8")
+    args = build_parser().parse_args(
+        ["--url", "http://example.com", "--allowlist-file", str(allowlist)]
+    )
+    cfg = _resolve_config(args)
+    assert cfg.allowed_targets == {"example.com"}
+
+
 def test_parse_http_url_with_custom_port():
-    args = build_parser().parse_args(["--url", "http://example.com:8080/", "-r", "128"])
+    args = build_parser().parse_args(
+        ["--url", "http://example.com:8080/", "-r", "128", "--allow-public-targets"]
+    )
     cfg = _resolve_config(args)
     assert (cfg.host, cfg.port, cfg.concurrency) == ("example.com", 8080, 128)
     assert cfg.secure is False
     assert cfg.header_host == "example.com:8080"
+
+
+def test_backend_flag_defaults_to_python():
+    args = build_parser().parse_args(["--url", "http://localhost", "--allow-public-targets"])
+    cfg = _resolve_config(args)
+    assert cfg.backend == "python"
+
+
+def test_backend_flag_can_select_rust():
+    args = build_parser().parse_args(
+        ["--url", "http://localhost", "--backend", "rust", "--allow-public-targets"]
+    )
+    cfg = _resolve_config(args)
+    assert cfg.backend == "rust"
 
 
 def test_legacy_host_flags():
@@ -31,7 +76,7 @@ def test_legacy_host_flags():
 
 
 def test_tor_flag_adds_socks5_proxy():
-    args = build_parser().parse_args(["--url", "http://x.com", "--tor"])
+    args = build_parser().parse_args(["--url", "http://x.com", "--tor", "--allow-public-targets"])
     cfg = _resolve_config(args)
     assert cfg.proxies is not None
     assert (cfg.proxies[0].scheme, cfg.proxies[0].host, cfg.proxies[0].port) == (
@@ -43,7 +88,7 @@ def test_tor_flag_adds_socks5_proxy():
 
 def test_proxy_env_fallback(monkeypatch):
     monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:8080")
-    args = build_parser().parse_args(["--url", "http://x.com"])
+    args = build_parser().parse_args(["--url", "http://x.com", "--allow-public-targets"])
     cfg = _resolve_config(args)
     assert cfg.proxies is not None
     assert cfg.proxies[0].scheme == "http"
@@ -64,6 +109,7 @@ def test_parse_custom_headers_and_method():
             "X-Test: 1",
             "--header",
             "User-Agent: CustomAgent/1.0",
+            "--allow-public-targets",
         ]
     )
     cfg = _resolve_config(args)
@@ -74,7 +120,9 @@ def test_parse_custom_headers_and_method():
 
 
 def test_no_random_path():
-    args = build_parser().parse_args(["--url", "http://example.com/api", "--no-random-path"])
+    args = build_parser().parse_args(
+        ["--url", "http://example.com/api", "--no-random-path", "--allow-public-targets"]
+    )
     cfg = _resolve_config(args)
     assert cfg.randomize_path is False
     assert cfg.path == "/api"
@@ -101,7 +149,9 @@ def test_negative_delay_validation():
 
 
 def test_ssl_no_verify():
-    args = build_parser().parse_args(["-u", "https://x.com", "--ssl-no-verify"])
+    args = build_parser().parse_args(
+        ["-u", "https://x.com", "--ssl-no-verify", "--allow-public-targets"]
+    )
     cfg = _resolve_config(args)
     assert cfg.ssl_verify is False
 

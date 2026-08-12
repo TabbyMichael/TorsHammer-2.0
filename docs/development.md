@@ -441,6 +441,59 @@ pip install memory_profiler
 python -m memory_profiler -m torshammer -u http://localhost:8080
 ```
 
+## Continuous Integration
+
+Torshammer uses [Woodpecker CI](https://woodpecker-ci.org/), configured in
+[`.woodpecker.yml`](../.woodpecker.yml). The pipeline validates both the Python and
+Rust backends across Python 3.11 / 3.12 / 3.13 and Rust 1.75 on every push and pull
+request to `main` / `develop`.
+
+### What CI runs
+
+- **Python (`python:3.11-slim`, `python:3.12-slim`, `python:3.13-slim`)**
+  1. `pip install -u pip`
+  2. `pip install -e ".[dev]"` (editable install — note the `.` before `[dev]`)
+  3. `pytest`
+  4. `pip install ruff mypy`
+  5. `ruff check .`
+  6. `ruff format --check .`
+  7. `mypy src/`
+
+- **Rust lint (`rust:1.75`)**
+  1. `rustup component add rustfmt` / `rustup component add clippy`
+  2. `cargo fmt --manifest-path rust/Cargo.toml -- --check`
+  3. `cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings`
+
+- **Rust build+test (`rust:1.75`)**
+  1. `cargo build --manifest-path rust/Cargo.toml`
+  2. `cargo test --manifest-path rust/Cargo.toml`
+
+> The Rust lint step pins the `rust:1.75` toolchain. Do **not** use
+> `--toolchain stable` when adding components — that channel is not installed in the
+> pinned image, so `cargo fmt` and `cargo clippy` would be unavailable.
+
+### Running CI locally with Docker
+
+To reproduce the pipeline locally, run any step with the matching image and mount:
+
+```bash
+# Python (any minor version)
+docker run --rm -v "$PWD:/workspace" -w /workspace python:3.12-slim \
+  sh -c 'pip install -e ".[dev]" && pytest && pip install ruff mypy && \
+         ruff check . && ruff format --check . && mypy src/'
+
+# Rust lint + build
+docker run --rm -v "$PWD:/workspace" -w /workspace rust:1.75 \
+  sh -c 'rustup component add rustfmt clippy && \
+         cargo fmt --manifest-path rust/Cargo.toml -- --check && \
+         cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings && \
+         cargo build --manifest-path rust/Cargo.toml && \
+         cargo test --manifest-path rust/Cargo.toml'
+```
+
+See [Testing Guide](testing.md#continuous-integration) for the full step table and
+linting notes.
+
 ## Documentation
 
 ### Updating Documentation

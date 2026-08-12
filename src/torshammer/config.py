@@ -21,6 +21,7 @@ class Config:
 
     concurrency: int = 256
     mode: str = "slow-post"
+    backend: str = "python"
     base_post_length: int = 4096  # baseline Content-Length for slow-post
 
     delay_min: float = 0.1
@@ -34,6 +35,8 @@ class Config:
     proxies: list[Proxy] | None = None
     rotate_proxies: bool = False
     proxy_max_failures: int = 3
+    allow_public_targets: bool = False
+    allowed_targets: set[str] = field(default_factory=set)
 
     user_agents: list[str] = field(default_factory=list)
     custom_headers: dict[str, str] = field(default_factory=dict)
