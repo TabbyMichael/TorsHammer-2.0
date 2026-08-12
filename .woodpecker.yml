@@ -7,7 +7,7 @@ steps:
     image: python:3.11-slim
     commands:
       - python -m pip install --upgrade pip
-      - pip install -e "[dev]"
+      - pip install -e ".[dev]"
       - pytest
       - python -m pip install ruff mypy
       - ruff check .
@@ -18,7 +18,7 @@ steps:
     image: python:3.12-slim
     commands:
       - python -m pip install --upgrade pip
-      - pip install -e "[dev]"
+      - pip install -e ".[dev]"
       - pytest
       - python -m pip install ruff mypy
       - ruff check .
@@ -29,12 +29,27 @@ steps:
     image: python:3.13-slim
     commands:
       - python -m pip install --upgrade pip
-      - pip install -e "[dev]"
+      - pip install -e ".[dev]"
       - pytest
       - python -m pip install ruff mypy
       - ruff check .
       - ruff format --check .
       - mypy src/
+
+- name: rust-lint
+  image: rust:1.75
+  commands:
+    # Install components if missing (rustfmt and clippy)
+    - rustup component add rustfmt || true
+    - rustup component add clippy || true
+    - cargo fmt --manifest-path rust/Cargo.toml -- --check || true
+    - cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings || true
+
+- name: rust-build
+  image: rust:1.75
+  commands:
+    - cargo build --manifest-path rust/Cargo.toml
+    - cargo test --manifest-path rust/Cargo.toml
 
 trigger:
   event:

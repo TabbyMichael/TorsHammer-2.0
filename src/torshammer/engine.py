@@ -82,11 +82,14 @@ class AttackEngine:
                 raise
             except (TimeoutError, ConnectionError, OSError, ssl.SSLError) as exc:
                 # Only report failures that are likely proxy-related
-                if proxy is not None and self._pool is not None:
-                    # Connection errors before establishing connection are often proxy issues
-                    # Timeout errors could be proxy or target
-                    if isinstance(exc, (ConnectionError, OSError)):
-                        self._pool.report_failure(proxy)
+                # (connection errors before establishing connection are
+                # often proxy issues; timeouts could be proxy or target).
+                if (
+                    proxy is not None
+                    and self._pool is not None
+                    and isinstance(exc, (ConnectionError, OSError))
+                ):
+                    self._pool.report_failure(proxy)
                 self.stats.errors += 1
                 if config.verbose:
                     print(f"  [w{idx}] {type(exc).__name__}: {exc}", flush=True)

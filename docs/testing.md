@@ -299,24 +299,61 @@ Each test should be independent:
 
 ## Continuous Integration
 
-**Note:** This project does not currently have CI/CD configuration.
+Torshammer 2.0 builds and tests on [Woodpecker CI](https://woodpecker-ci.org/). The
+pipeline is defined in [`../.woodpecker.yml`](../.woodpecker.yml) (from the repo root)
+and runs on every push and pull request to `main` / `develop`.
 
-To add CI, consider:
+### Pipeline steps
 
-```yaml
-# .github/workflows/test.yml
-name: Tests
-on: [push, pull_request]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      - run: pip install -e ".[dev]"
-      - run: pytest
+| Step          | Image            | Commands |
+|---------------|------------------|----------|
+| `test-3.11`   | `python:3.11-slim` | `pip install -e ".[dev]"`, `pytest`, `ruff check .`, `ruff format --check .`, `mypy src/` |
+| `test-3.12`   | `python:3.12-slim` | same as above |
+| `test-3.13`   | `python:3.13-slim` | same as above |
+| `rust-lint`   | `rust:1.75`        | `cargo fmt -- --check` + `cargo clippy --all-targets -- -D warnings` |
+| `rust-build`  | `rust:1.75`        | `cargo build` + `cargo test` |
+
+### Installing dependencies (editable mode)
+
+Dependencies are installed in editable mode so the live source tree is used. The
+install command **must include the project directory**:
+
+```bash
+pip install -e ".[dev]"
+```
+
+> `pip install -e "[dev]"` (without the `.`) is **not** a valid editable requirement
+> and will fail — pip needs to know which directory to install in editable mode.
+
+### Rust toolchain
+
+The lint container uses the pinned `rust:1.75` image, whose default toolchain is
+`1.75.0` (there is no separate `stable` channel). Components must be added to that
+default toolchain:
+
+```bash
+rustup component add rustfmt
+rustup component add clippy
+cargo fmt --manifest-path rust/Cargo.toml -- --check
+cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings
+```
+
+> Using `--toolchain stable` here resolves to nothing in the pinned image and leaves
+> `cargo fmt` / `cargo clippy` unavailable, failing the lint step.
+
+### Clippy style guidance
+
+Clippy runs with `-D warnings` (warnings are errors). When a pattern lint fires,
+prefer a `char` literal for single-character patterns:
+
+```rust
+// preferred
+value.contains('x')
+value.starts_with('1')
+
+// triggers clippy::single_char_pattern
+value.contains("x")
+value.starts_with("1")
 ```
 
 ## Test Coverage

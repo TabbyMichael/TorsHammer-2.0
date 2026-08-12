@@ -1,0 +1,14 @@
+######  ####  ####    ####  #    #  ####  #    # #    # #####  ####
+  #    #    # #   #  #      #    # #    # ##  ## ##  ## #      #   #
+  #    #    # ####    ####  ###### ###### # ## # # ## # ####   ####
+  #    #    # # #         # #    # #    # #    # #    # #      # #
+  #     ####  #  #   ####   #    # #    # #    # #    # #####  #  #
+
+TorsHammer {VER}
+Security Testing & Vulnerability Assessment Framework
+
+Target  : {TARGET}
+Backend : {BACKEND}
+Mode    : {MODE}
+Conns   : {CONCURRENCY}
+

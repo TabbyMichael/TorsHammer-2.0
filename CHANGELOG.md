@@ -5,6 +5,19 @@ All notable changes to Torshammer 2.0 will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed Woodpecker CI Python steps: `pip install -e ".[dev]"` (previously written as
+  `pip install -e "[dev]"` without the project directory, which is not a valid
+  editable requirement and failed to install).
+- Fixed the Rust lint step targeting a non-existent `stable` toolchain in the pinned
+  `rust:1.75` image — components are now added to the default `1.75.0` toolchain so
+  `cargo fmt` and `cargo clippy` actually run.
+- Fixed `clippy::single_char_pattern` lint errors in the Rust CLI tests by using
+  `char` literals (e.g. `contains('\u{2026}')`, `starts_with('1')`).
+
 ## [2.0.0] - 2026-08-10
 
 ### Added

@@ -45,3 +45,10 @@ selfhost/runner/
 selfhost/.env
 selfhost/.runner
 selfhost/config.yaml
+
+# Rust build artifacts
+/rust/target/
+**/target/
+
+# Cargo generated files (optional to ignore Cargo.lock for apps if you prefer reproducible builds elsewhere)
+# /rust/Cargo.lock

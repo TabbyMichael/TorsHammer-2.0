@@ -60,7 +60,7 @@ def _path(config: Config) -> str:
 
 def _merge_headers(base_headers: list[str], custom_headers: list[str]) -> list[str]:
     """Merge custom headers into base headers.
-    
+
     Custom headers are applied AFTER base headers so they can override defaults.
     """
     if not custom_headers:

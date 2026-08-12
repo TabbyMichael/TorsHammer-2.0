@@ -90,6 +90,28 @@ For development:
 pip install -e ".[dev]"
 ```
 
+## Dual-runtime strategy (Python + Rust)
+
+The project is intentionally designed to support both runtime implementations side by side:
+
+- Python stays the default and reference implementation for rapid iteration and compatibility.
+- Rust is added as an alternate backend for the performance-sensitive networking layer.
+- Both backends share the same safety policy, target validation rules, and CLI contract.
+
+This gives operators a choice without forcing a risky full rewrite. The Python path remains the stable baseline, while the Rust backend is matured in parallel and promoted later only after benchmarking proves a clear advantage.
+
+### Rust backend status
+
+A Rust scaffold is available in the `rust/` directory and can be built directly with Cargo:
+
+```bash
+cd rust
+cargo build
+cargo run -- --target http://127.0.0.1:8080 --backend rust
+```
+
+This scaffold is intentionally conservative: it demonstrates the intended dual-runtime model without claiming full feature parity with the Python engine yet.
+
 ## Quick Start
 
 1. **Install the tool** (see Installation above)
@@ -121,6 +143,8 @@ torshammer -u http://example.com -m slow-read -d 300 --json > stats.log
 
 The original flags still work: `-t <host> -r <threads> -p <port> -T`.
 
+By default the tool refuses to target public internet hosts unless the operator explicitly opts in with `--allow-public-targets` or a `--allowlist-file`. This is a built-in safety guardrail meant to reduce accidental misuse against third-party systems.
+
 ### Options
 
 | Flag | Meaning | Default |
@@ -135,6 +159,9 @@ The original flags still work: `-t <host> -r <threads> -p <port> -T`.
 | `--proxy` / `--proxy-list` | Single proxy URL / file of proxy URLs | none |
 | `--rotate-proxies` | Random proxy per connection | off |
 | `--ssl-no-verify` | Skip TLS certificate validation | off |
+| `--backend` | Choose runtime backend: `python` or `rust` | python |
+| `--allow-public-targets` | Permit public internet targets (explicit authorization required) | off |
+| `--allowlist-file` | File of allowed hostnames / IPs; entries are always permitted | none |
 | `--json` | Newline-delimited JSON stats | off |
 | `-q / -v` | Quiet / verbose | - |
 
