@@ -90,27 +90,18 @@ For development:
 pip install -e ".[dev]"
 ```
 
-## Dual-runtime strategy (Python + Rust)
+### Windows-Specific Considerations
 
-The project is intentionally designed to support both runtime implementations side by side:
+**High Concurrency on Windows:**
+- Windows uses the ProactorEventLoop by default, which handles high concurrency well
+- The older SelectorEventLoop had limitations (~512 sockets), but ProactorEventLoop does not
+- If you encounter issues, you may need to adjust your event loop policy
+- File descriptor limits are different on Windows; the tool will warn if concurrency is too high
 
-- Python stays the default and reference implementation for rapid iteration and compatibility.
-- Rust is added as an alternate backend for the performance-sensitive networking layer.
-- Both backends share the same safety policy, target validation rules, and CLI contract.
-
-This gives operators a choice without forcing a risky full rewrite. The Python path remains the stable baseline, while the Rust backend is matured in parallel and promoted later only after benchmarking proves a clear advantage.
-
-### Rust backend status
-
-A Rust scaffold is available in the `rust/` directory and can be built directly with Cargo:
-
-```bash
-cd rust
-cargo build
-cargo run -- --target http://127.0.0.1:8080 --backend rust
-```
-
-This scaffold is intentionally conservative: it demonstrates the intended dual-runtime model without claiming full feature parity with the Python engine yet.
+**Performance Tips:**
+- Start with lower concurrency (e.g., `-c 128`) and increase gradually
+- Monitor system resources during high-concurrency tests
+- Use `--duration` for time-limited tests to avoid uncontrolled resource usage
 
 ## Quick Start
 
@@ -128,8 +119,6 @@ thm | conns=256 open=256 done=12 err=0 | sent 45.2 KB @ 12.3 KB/s | recv 0.0 B |
 ```
 
 4. **Stop with Ctrl-C** when done
-
-## Usage
 
 ## Usage
 
@@ -376,31 +365,3 @@ GPL-2.0-or-later - See [LICENSE](LICENSE) for details.
 
 The original Tor's Hammer by e.c. / SourceForge project, and SocksiPy by
 Dan Haim that shipped with it.
-
-## Development
-
-```bash
-pip install -e ".[dev]"
-pytest                 # runs against a local demon server + fake SOCKS5 proxy
-python -m torshammer --help
-```
-
-Layout:
-
-```
-src/torshammer/
-  cli.py        argparse CLI + orchestration + signal handling
-  config.py     Config dataclass (all knobs)
-  engine.py     asyncio attack engine + Stats
-  profiles.py   the four attack vectors
-  conn.py       plain/TLS/socks5/socks4/http connect (pure stdlib)
-  proxies.py    proxy parsing + rotation
-  useragents.py UA list + file loader
-tests/          pytest suite (local server, fake SOCKS5, CLI parsing)
-legacy/         original 2011 Python-2 sources, kept for reference
-```
-
-## Acknowledgements
-
-The original Tor's Hammer by e.c. / SourceForge project, and SocksiPy by
-Dan Haim that shipped with it.# TorsHammer-2.0

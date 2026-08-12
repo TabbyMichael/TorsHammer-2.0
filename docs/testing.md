@@ -299,62 +299,67 @@ Each test should be independent:
 
 ## Continuous Integration
 
-Torshammer 2.0 builds and tests on [Woodpecker CI](https://woodpecker-ci.org/). The
-pipeline is defined in [`../.woodpecker.yml`](../.woodpecker.yml) (from the repo root)
-and runs on every push and pull request to `main` / `develop`.
+This project uses **Forgejo Actions** for continuous integration via a self-hosted Forgejo instance.
 
-### Pipeline steps
+**Workflow location:** `.forgejo/workflows/test.yml`
 
-| Step          | Image            | Commands |
-|---------------|------------------|----------|
-| `test-3.11`   | `python:3.11-slim` | `pip install -e ".[dev]"`, `pytest`, `ruff check .`, `ruff format --check .`, `mypy src/` |
-| `test-3.12`   | `python:3.12-slim` | same as above |
-| `test-3.13`   | `python:3.13-slim` | same as above |
-| `rust-lint`   | `rust:1.75`        | `cargo fmt -- --check` + `cargo clippy --all-targets -- -D warnings` |
-| `rust-build`  | `rust:1.75`        | `cargo build` + `cargo test` |
+The Forgejo Actions workflow runs automatically on:
+- Push to the `main` branch
+- Pull requests targeting the `main` branch
 
-### Installing dependencies (editable mode)
+**Workflow configuration:**
 
-Dependencies are installed in editable mode so the live source tree is used. The
-install command **must include the project directory**:
+```yaml
+# .forgejo/workflows/test.yml
+name: Test
 
-```bash
-pip install -e ".[dev]"
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run tests
+        run: |
+          pytest
+
+      - name: Run ruff check
+        run: |
+          pip install ruff
+          ruff check .
+
+      - name: Run ruff format check
+        run: |
+          ruff format --check .
+
+      - name: Run mypy
+        run: |
+          pip install mypy
+          mypy src/
 ```
 
-> `pip install -e "[dev]"` (without the `.`) is **not** a valid editable requirement
-> and will fail — pip needs to know which directory to install in editable mode.
-
-### Rust toolchain
-
-The lint container uses the pinned `rust:1.75` image, whose default toolchain is
-`1.75.0` (there is no separate `stable` channel). Components must be added to that
-default toolchain:
-
-```bash
-rustup component add rustfmt
-rustup component add clippy
-cargo fmt --manifest-path rust/Cargo.toml -- --check
-cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings
-```
-
-> Using `--toolchain stable` here resolves to nothing in the pinned image and leaves
-> `cargo fmt` / `cargo clippy` unavailable, failing the lint step.
-
-### Clippy style guidance
-
-Clippy runs with `-D warnings` (warnings are errors). When a pattern lint fires,
-prefer a `char` literal for single-character patterns:
-
-```rust
-// preferred
-value.contains('x')
-value.starts_with('1')
-
-// triggers clippy::single_char_pattern
-value.contains("x")
-value.starts_with("1")
-```
+**Note:** Forgejo reads workflows from `.forgejo/workflows/`. A `.github/workflows/` directory (used by GitHub.com) is not used by this project.
 
 ## Test Coverage
 

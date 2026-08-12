@@ -14,6 +14,12 @@ A modern, Python 3 rewrite of the classic Tor's Hammer slow-POST DoS
 * shuts down cleanly on Ctrl-C / SIGTERM.
 """
 
-__version__ = "2.0.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("torshammer")
+except PackageNotFoundError:
+    # Fallback for development installs
+    __version__ = "2.0.0"
 
 __all__ = ["__version__"]
