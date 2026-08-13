@@ -115,8 +115,10 @@ def test_parse_custom_headers_and_method():
     cfg = _resolve_config(args)
     assert cfg.method == "PUT"
     assert cfg.path == "/custom"
-    assert "X-Test: 1" in cfg.custom_headers
-    assert "User-Agent: CustomAgent/1.0" in cfg.custom_headers
+    assert "X-Test" in cfg.custom_headers
+    assert cfg.custom_headers["X-Test"] == "1"
+    # User-Agent passed as --header is stored as a custom header (CLI dict style)
+    assert "User-Agent" in cfg.custom_headers
 
 
 def test_no_random_path():

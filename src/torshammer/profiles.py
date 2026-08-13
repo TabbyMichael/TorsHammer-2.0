@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import secrets
 import string
 from abc import ABC, abstractmethod
 
@@ -52,6 +53,8 @@ def _random_header_name(name: str) -> str:
 
 
 def _path(config: Config) -> str:
+    if not config.randomize_path:
+        return config.path
     separator = "&" if "?" in config.path else "?"
     return f"{config.path}{separator}{secrets.token_urlsafe(6)}"
 
@@ -80,11 +83,20 @@ def _base_headers(config: Config, ua: str) -> list[str]:
     if random.random() < 0.4:
         headers.append(f"X-Trace-Id: {secrets.token_hex(6)}")
 
-    # Add custom headers (skip critical headers that shouldn't be overridden)
-    critical_headers = {"host", "user-agent", "connection"}
-    for name, value in config.custom_headers.items():
-        if name.lower() not in critical_headers:
-            headers.append(f"{name}: {value}")
+    # Add custom headers (skip critical headers that shouldn't be overridden via CLI)
+    # custom_headers may be either a dict[str,str] (normal case) or a list[str]
+    # (pre-formatted 'Name: Value' strings for programmatic override).
+    custom = config.custom_headers
+    if isinstance(custom, dict):
+        # CLI-sourced: filter out structural headers to prevent accidental corruption
+        critical_headers = {"host", "user-agent", "connection"}
+        for name, value in custom.items():
+            if name.lower() not in critical_headers:
+                headers.append(f"{name}: {value}")
+    else:
+        # Programmatic list: caller takes full responsibility; no filter applied.
+        for header in custom:
+            headers.append(header)
 
     return headers
 
@@ -144,9 +156,10 @@ class SlowPost(Profile):
         headers = _base_headers(config, ua)
         headers.append("Content-Type: application/x-www-form-urlencoded")
         headers.append(f"Content-Length: {length}")
-        method = config.method or "POST"
         req = (
-            f"{method} {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
+            f"{config.method or 'POST'} {_path(config)} HTTP/1.1\r\n"
+            + "\r\n".join(headers)
+            + "\r\n\r\n"
         ).encode()
         await _write(writer, req, stats)
 
@@ -154,7 +167,7 @@ class SlowPost(Profile):
             # Send custom body byte by byte
             sent = 0
             while not stop.is_set() and sent < length:
-                await _write(writer, body[sent:sent+1], stats)
+                await _write(writer, body[sent : sent + 1], stats)
                 sent += 1
                 await _halt(stop, config)
         else:
@@ -176,8 +189,7 @@ class SlowPostHeaders(Profile):
         headers = _base_headers(config, ua)
         headers.append("Content-Type: application/x-www-form-urlencoded")
         headers.append(f"Content-Length: {length}")
-        method = config.method or "POST"
-        lines = [f"{method} {_path(config)} HTTP/1.1"] + headers
+        lines = [f"{config.method or 'POST'} {_path(config)} HTTP/1.1"] + headers
         while lines and not stop.is_set():
             await _write(writer, (lines.pop(0) + "\r\n").encode(), stats)
             await _halt(stop, config)
@@ -196,8 +208,7 @@ class SlowHeaders(Profile):
     async def run(self, reader, writer, config, ua, stats, stop):
         # Send the request line with the Host/UA headers but never the
         # terminating blank line, so the request stays "in progress".
-        method = config.method or "GET"
-        req = f"{method} {_path(config)} HTTP/1.1\r\n".encode()
+        req = f"{config.method or 'GET'} {_path(config)} HTTP/1.1\r\n".encode()
         await _write(writer, req, stats)
         # Send custom headers first (if any), then random X-headers
         if config.custom_headers:
@@ -217,9 +228,10 @@ class SlowRead(Profile):
 
     async def run(self, reader, writer, config, ua, stats, stop):
         headers = _base_headers(config, ua)
-        method = config.method or "GET"
         req = (
-            f"{method} {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
+            f"{config.method or 'GET'} {_path(config)} HTTP/1.1\r\n"
+            + "\r\n".join(headers)
+            + "\r\n\r\n"
         ).encode()
         await _write(writer, req, stats)
         while not stop.is_set():
@@ -249,9 +261,10 @@ class Chunked(Profile):
         headers = _base_headers(config, ua)
         headers.append("Transfer-Encoding: chunked")
         headers.append("Content-Type: application/x-www-form-urlencoded")
-        method = config.method or "POST"
         req = (
-            f"{method} {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
+            f"{config.method or 'POST'} {_path(config)} HTTP/1.1\r\n"
+            + "\r\n".join(headers)
+            + "\r\n\r\n"
         ).encode()
         await _write(writer, req, stats)
 
@@ -260,7 +273,7 @@ class Chunked(Profile):
             sent = 0
             while not stop.is_set() and sent < length:
                 chunk_size = min(random.randint(1, 4), length - sent)
-                chunk = body[sent:sent + chunk_size]
+                chunk = body[sent : sent + chunk_size]
                 await _write(writer, f"{chunk_size:x}\r\n".encode() + chunk + b"\r\n", stats)
                 sent += chunk_size
                 await _halt(stop, config)

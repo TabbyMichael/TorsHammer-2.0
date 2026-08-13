@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import random
 
 import pytest
 
@@ -106,14 +105,24 @@ async def test_engine_stops_via_event(slow_server):
     assert engine.stats.active == 0
 
 
-def test_random_path_is_reproducible_with_seed():
+def test_random_path_appends_token_when_enabled():
+    """_path should append a URL-safe token when randomize_path is True."""
     cfg = Config(host="example.com", port=80, path="/api", randomize_path=True)
-    random.seed(123)
     path1 = _path(cfg)
-    random.seed(123)
     path2 = _path(cfg)
-    assert path1 == path2
+    # Shape: must start with the configured path followed by ?<token>
     assert path1.startswith("/api?")
+    assert path2.startswith("/api?")
+    # Two consecutive calls should produce different tokens (CSPRNG, not seeded random)
+    # This is not guaranteed but astronomically likely; if it fails, there's a real bug.
+    assert path1 != path2
+
+
+def test_random_path_disabled_returns_bare_path():
+    """_path should return the bare path when randomize_path is False."""
+    cfg = Config(host="example.com", port=80, path="/api", randomize_path=False)
+    assert _path(cfg) == "/api"
+    assert _path(cfg) == "/api"  # Must be stable
 
 
 def test_custom_headers_override_defaults():
@@ -134,7 +143,7 @@ async def test_slow_headers_sends_custom_headers(slow_server):
     """Profile-level coverage: SlowHeaders should send custom headers."""
     cfg = _cfg(
         slow_server,
-        custom_headers=["X-Custom: test-value", "X-Another: another-value"],
+        custom_headers={"X-Custom": "test-value", "X-Another": "another-value"},
     )
     stats = await _drive(PROFILES["slow-headers"], cfg, run_for=0.2)
     assert stats.bytes_sent > 0
@@ -147,7 +156,7 @@ async def test_slow_post_sends_custom_headers(slow_server):
     cfg = _cfg(
         slow_server,
         mode="slow-post",
-        custom_headers=["X-Custom: test-value"],
+        custom_headers={"X-Custom": "test-value"},
     )
     stats = await _drive(PROFILES["slow-post"], cfg, run_for=0.2)
     assert stats.bytes_sent > 0
