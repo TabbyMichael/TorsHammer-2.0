@@ -105,9 +105,12 @@ def _dribble(n: int = 1) -> bytes:
     return "".join(random.choice(_ALNUM) for _ in range(n)).encode()
 
 
-async def _write(writer: asyncio.StreamWriter, data: bytes, stats: Stats) -> None:
+async def _write(writer: asyncio.StreamWriter, data: bytes, stats: Stats, config: Config) -> None:
     writer.write(data)
-    await writer.drain()
+    try:
+        await asyncio.wait_for(writer.drain(), timeout=config.connect_timeout * 2)
+    except TimeoutError:
+        raise ConnectionError("write drain timed out")
     stats.bytes_sent += len(data)
 
 
@@ -161,24 +164,12 @@ class SlowPost(Profile):
             + "\r\n".join(headers)
             + "\r\n\r\n"
         ).encode()
-        await _write(writer, req, stats)
-
-        if body:
-            # Send custom body byte by byte
-            sent = 0
-            while not stop.is_set() and sent < length:
-                await _write(writer, body[sent : sent + 1], stats)
-                sent += 1
-                await _halt(stop, config)
-        else:
-            # Send random dribble data
-            sent = 0
-            while not stop.is_set() and sent < length:
-                await _write(writer, _dribble(), stats)
-                sent += 1
-                await _halt(stop, config)
-
-        return not stop.is_set()  # True if completed, False if interrupted
+        await _write(writer, req, stats, config)
+        sent = 0
+        while not stop.is_set() and sent < length:
+            await _write(writer, _dribble(), stats, config)
+            sent += 1
+            await _halt(stop, config)
 
 
 class SlowPostHeaders(Profile):
@@ -191,13 +182,13 @@ class SlowPostHeaders(Profile):
         headers.append(f"Content-Length: {length}")
         lines = [f"{config.method or 'POST'} {_path(config)} HTTP/1.1"] + headers
         while lines and not stop.is_set():
-            await _write(writer, (lines.pop(0) + "\r\n").encode(), stats)
+            await _write(writer, (lines.pop(0) + "\r\n").encode(), stats, config)
             await _halt(stop, config)
         if not stop.is_set():
-            await _write(writer, b"\r\n", stats)
+            await _write(writer, b"\r\n", stats, config)
         sent = 0
         while not stop.is_set() and sent < length:
-            await _write(writer, _dribble(), stats)
+            await _write(writer, _dribble(), stats, config)
             sent += 1
             await _halt(stop, config)
 
@@ -208,17 +199,18 @@ class SlowHeaders(Profile):
     async def run(self, reader, writer, config, ua, stats, stop):
         # Send the request line with the Host/UA headers but never the
         # terminating blank line, so the request stays "in progress".
-        req = f"{config.method or 'GET'} {_path(config)} HTTP/1.1\r\n".encode()
-        await _write(writer, req, stats)
+        method = config.method or "GET"
+        req = f"{method} {_path(config)} HTTP/1.1\r\n".encode()
+        await _write(writer, req, stats, config)
         # Send custom headers first (if any), then random X-headers
         if config.custom_headers:
             for header in config.custom_headers:
-                await _write(writer, (header + "\r\n").encode(), stats)
+                await _write(writer, (header + "\r\n").encode(), stats, config)
                 await _halt(stop, config)
         while not stop.is_set():
             key = f"X-{_rand_hex(6)}"
             value = _rand_hex(8)
-            await _write(writer, f"{key}: {value}\r\n".encode(), stats)
+            await _write(writer, f"{key}: {value}\r\n".encode(), stats, config)
             await _halt(stop, config)
         return not stop.is_set()  # True if completed, False if interrupted
 
@@ -233,7 +225,7 @@ class SlowRead(Profile):
             + "\r\n".join(headers)
             + "\r\n\r\n"
         ).encode()
-        await _write(writer, req, stats)
+        await _write(writer, req, stats, config)
         while not stop.is_set():
             try:
                 chunk = await asyncio.wait_for(reader.read(8), timeout=config.connect_timeout * 2)
@@ -266,28 +258,14 @@ class Chunked(Profile):
             + "\r\n".join(headers)
             + "\r\n\r\n"
         ).encode()
-        await _write(writer, req, stats)
-
-        if body:
-            # Send custom body in chunks
-            sent = 0
-            while not stop.is_set() and sent < length:
-                chunk_size = min(random.randint(1, 4), length - sent)
-                chunk = body[sent : sent + chunk_size]
-                await _write(writer, f"{chunk_size:x}\r\n".encode() + chunk + b"\r\n", stats)
-                sent += chunk_size
-                await _halt(stop, config)
-        else:
-            # Send random dribble data in chunks
-            sent = 0
-            while not stop.is_set() and sent < length:
-                size = random.randint(1, 4)
-                payload = _dribble(size)
-                await _write(writer, f"{size:x}\r\n".encode() + payload + b"\r\n", stats)
-                sent += size
-                await _halt(stop, config)
-
-        return not stop.is_set()  # True if completed, False if interrupted
+        await _write(writer, req, stats, config)
+        sent = 0
+        while not stop.is_set() and sent < length:
+            size = random.randint(1, 4)
+            payload = _dribble(size)
+            await _write(writer, f"{size:x}\r\n".encode() + payload + b"\r\n", stats, config)
+            sent += size
+            await _halt(stop, config)
 
 
 PROFILES: dict[str, type[Profile]] = {

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from torshammer.cli import _resolve_config, build_parser
+from torshammer.cli import _print_summary, _resolve_config, build_parser
+from torshammer.stats import Stats
 
 
 def test_parse_https_url():
@@ -61,7 +62,21 @@ def test_backend_flag_defaults_to_python():
     assert cfg.backend == "python"
 
 
-def test_backend_flag_can_select_rust():
+def test_backend_flag_rust_falls_back_when_binary_missing():
+    """When --backend rust is requested but the binary is not on PATH, we
+    fall back to the python engine (with a warning on stderr)."""
+    args = build_parser().parse_args(
+        ["--url", "http://localhost", "--backend", "rust", "--allow-public-targets"]
+    )
+    cfg = _resolve_config(args)
+    assert cfg.backend == "python"
+
+
+def test_backend_flag_rust_used_when_binary_present(monkeypatch):
+    """When --backend rust is requested AND the binary exists on PATH, keep rust."""
+    monkeypatch.setattr(
+        "torshammer.cli.shutil.which", lambda name: "/usr/local/bin/torshammer-rust"
+    )
     args = build_parser().parse_args(
         ["--url", "http://localhost", "--backend", "rust", "--allow-public-targets"]
     )
@@ -165,3 +180,21 @@ def test_mode_choice_validation():
         raise AssertionError("should have failed")
     except SystemExit:
         pass
+
+
+def test_print_summary_goes_to_stderr_with_json(monkeypatch, capsys):
+    """With json_output=True, _print_summary must write to stderr, not stdout."""
+    summary = Stats()
+    _print_summary(summary, json_output=True)
+    captured = capsys.readouterr()
+    assert "connections opened" in captured.err
+    assert "connections opened" not in captured.out
+
+
+def test_print_summary_goes_to_stdout_by_default(capsys):
+    """By default _print_summary writes to stdout."""
+    summary = Stats()
+    _print_summary(summary)
+    captured = capsys.readouterr()
+    assert "connections opened" in captured.out
+    assert "connections opened" not in captured.err
