@@ -7,9 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Test coverage for SOCKS4a, HTTP CONNECT, SOCKS5 username/password auth, and
+  TLS/HTTPS connection paths (direct and through a SOCKS5 relay proxy).
+- New test fixtures: `FakeSocks4`, `FakeHttpProxy`, `FakeSocks5Auth`,
+  `RelaySocks5`, and a self-signed-certificate-backed `TlsServer`.
+- Tests for `_resolve_backend` behaviour and JSON summary routing.
+
 ### Fixed
 
-- Fixed Woodpecker CI Python steps: `pip install -e ".[dev]"` (previously written as
+- `--backend rust` no longer silently runs the Python engine. It now logs a
+  warning to stderr and falls back to Python when the `torshammer-rust` binary
+  is not on PATH, keeping stdout clean (and making the flag's behaviour clear).
+- In JSON mode (`--json`), the startup banner and final summary are now written
+  to stderr so stdout remains a clean newline-delimited JSON stream that can be
+  piped directly to parsers.
+- Dribble writes in attack profiles now apply `config.connect_timeout * 2` as a
+  `writer.drain()` timeout, preventing a worker from hanging forever if a target
+  stops reading.
+- Removed a duplicated `## Usage` heading in README.md.
+
+
   `pip install -e "[dev]"` without the project directory, which is not a valid
   editable requirement and failed to install).
 - Fixed the Rust lint step targeting a non-existent `stable` toolchain in the pinned
