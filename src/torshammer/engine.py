@@ -79,7 +79,10 @@ class AttackEngine:
             # Circuit breaker: exit if max consecutive errors reached
             if config.max_errors > 0 and consecutive_errors >= config.max_errors:
                 if config.verbose:
-                    print(f"  [w{idx}] Circuit breaker: {consecutive_errors} consecutive errors, exiting", flush=True)
+                    print(
+                        f"  [w{idx}] Circuit breaker: {consecutive_errors} consecutive errors, exiting",
+                        flush=True,
+                    )
                 self._circuit_breaker_triggered = True
                 self.stop.set()  # Signal all workers to stop
                 return
@@ -112,21 +115,16 @@ class AttackEngine:
             except asyncio.CancelledError:
                 raise
             except (TimeoutError, ConnectionError, OSError, ssl.SSLError) as exc:
-                # Only report failures that are likely proxy-related
-                # (connection errors before establishing connection are
-                # often proxy issues; timeouts could be proxy or target).
-                if (
-                    proxy is not None
-                    and self._pool is not None
-                    and isinstance(exc, (ConnectionError, OSError))
-                ):
-                    self._pool.report_failure(proxy)
                 self.stats.errors += 1
                 consecutive_errors += 1
                 if config.verbose:
-                    print(f"  [w{idx}] {type(exc).__name__}: {exc} (consecutive: {consecutive_errors})", flush=True)
+                    print(
+                        f"  [w{idx}] {type(exc).__name__}: {exc} (consecutive: {consecutive_errors})",
+                        flush=True,
+                    )
 
-                # Record proxy failure
+                # Deprioritize the proxy (don't remove it); recovery is handled
+                # by the proxy's cooldown window.
                 if proxy and self._pool:
                     self._pool.record_failure(proxy)
 

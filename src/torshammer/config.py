@@ -21,20 +21,21 @@ class Config:
 
     concurrency: int = 256
     mode: str = "slow-post"
+    method: str | None = None  # Override HTTP method per profile (None = profile default)
     backend: str = "python"
     base_post_length: int = 4096  # baseline Content-Length for slow-post
+    randomize_path: bool = True  # Append a random token to every request path
 
     delay_min: float = 0.1
     delay_max: float = 3.0
     duration: float = 0.0  # seconds; 0 == unlimited
     connect_timeout: float = 15.0
     ssl_verify: bool = True
-    max_errors: int = 0             # circuit breaker: exit after N consecutive errors
-    ramp_up: int = 0               # stagger worker starts (N per second, 0 = immediate)
+    max_errors: int = 0  # circuit breaker: exit after N consecutive errors
+    ramp_up: int = 0  # stagger worker starts (N per second, 0 = immediate)
 
     proxies: list[Proxy] | None = None
     rotate_proxies: bool = False
-    proxy_max_failures: int = 3
     allow_public_targets: bool = False
     allowed_targets: set[str] = field(default_factory=set)
 
@@ -49,7 +50,9 @@ class Config:
     verbose: int = 0
 
     # Cached SSL context to avoid recreating for each connection
-    _cached_ssl_context: ssl.SSLContext | None = field(default=None, init=False, repr=False, compare=False)
+    _cached_ssl_context: ssl.SSLContext | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
@@ -100,24 +103,6 @@ class Config:
         lo = min(self.delay_min, self.delay_max)
         hi = max(self.delay_min, self.delay_max)
         return random.uniform(lo, hi)
-
-    def validate(self) -> None:
-        if self.concurrency < 1:
-            raise ValueError("concurrency must be at least 1")
-        if self.delay_min < 0 or self.delay_max < 0:
-            raise ValueError("delay values must be non-negative")
-        if self.delay_min > self.delay_max:
-            raise ValueError("delay-min cannot be greater than delay-max")
-        if self.duration < 0:
-            raise ValueError("duration must be non-negative")
-        if self.connect_timeout <= 0:
-            raise ValueError("connect-timeout must be positive")
-        if self.base_post_length < 1:
-            raise ValueError("post-length must be at least 1")
-        if self.proxy_max_failures < 1:
-            raise ValueError("proxy-max-failures must be at least 1")
-        if self.stats_interval <= 0:
-            raise ValueError("stats-interval must be positive")
 
     def ssl_context(self) -> ssl.SSLContext | None:
         """Return a cached TLS context for HTTPS targets, else None."""
