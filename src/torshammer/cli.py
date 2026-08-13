@@ -6,7 +6,13 @@ import argparse
 import asyncio
 import ipaddress
 import os
+<<<<<<< Updated upstream
 import resource
+=======
+import random
+import re
+import shutil
+>>>>>>> Stashed changes
 import signal
 import sys
 import time
@@ -53,7 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--backend",
         choices=["python", "rust"],
         default="python",
-        help="Select the runtime backend; rust is an alternate high-performance implementation.",
+        help=(
+            "Select the runtime backend (python is the reference implementation; "
+            "rust is reserved for a future high-performance backend). Selecting "
+            "rust logs a warning and falls back to python when the Rust binary "
+            "is not installed."
+        ),
     )
     target.add_argument(
         "--allow-public-targets",
@@ -195,6 +206,28 @@ def _parse_custom_headers(raw_headers: list[str]) -> list[str]:
     return headers
 
 
+def _resolve_backend(requested: str) -> str:
+    """Resolve the runtime backend, warning and falling back to Python if rust is requested but unavailable.
+
+    The Rust backend is not yet implemented as an attack engine. If the user
+    explicitly selects ``--backend rust`` we check for the ``torshammer-rust``
+    binary on PATH. If it is absent (the common case today), we log a clear
+    warning to stderr and fall back to the Python reference engine so the run
+    can proceed. This avoids silently running the Python engine when the user
+    intended the Rust backend.
+    """
+    if requested == "python":
+        return "python"
+    if shutil.which("torshammer-rust") is not None:
+        return "rust"
+    print(
+        "  [warn] --backend rust requested but 'torshammer-rust' binary not found"
+        " on PATH. Falling back to the python reference engine.",
+        file=sys.stderr,
+    )
+    return "python"
+
+
 def _resolve_config(args: argparse.Namespace) -> Config:
     url = args.url or args.target
     host: str | None = None
@@ -267,7 +300,7 @@ def _resolve_config(args: argparse.Namespace) -> Config:
         header_host=header_host,
         concurrency=max(1, args.concurrency),
         mode=args.mode,
-        backend=args.backend,
+        backend=_resolve_backend(args.backend),
         base_post_length=max(1, args.post_length),
         delay_min=args.delay_min,
         delay_max=args.delay_max,
@@ -398,6 +431,7 @@ async def _run(config: Config) -> AttackEngine:
     try:
         await engine.run()
     finally:
+<<<<<<< Updated upstream
         _print_summary(engine.stats, config.json_output)
     return engine
 
@@ -436,6 +470,27 @@ def _check_fd_limits(concurrency: int) -> None:
     except (ValueError, OSError):
         # getrlimit can fail on some systems, just skip the check
         pass
+=======
+        _print_summary(engine.stats, json_output=config.json_output)
+
+
+def _print_summary(stats: Stats, json_output: bool = False) -> None:
+    """Print the final summary.
+
+    When ``json_output`` is set, the summary is written to stderr so it does
+    not pollute the newline-delimited JSON stream on stdout.
+    """
+    stream = sys.stderr if json_output else sys.stdout
+    uptime = time.monotonic() - stats.start
+    print(file=stream)
+    print("  connections opened :", stats.connections, file=stream)
+    print("  peak concurrent    :", stats.peak_active, file=stream)
+    print("  completed cycles   :", stats.completed, file=stream)
+    print("  errors             :", stats.errors, file=stream)
+    print("  bytes sent         :", human_size(stats.bytes_sent), file=stream)
+    print("  bytes received     :", human_size(stats.bytes_received), file=stream)
+    print("  elapsed            :", f"{int(uptime // 60)}:{int(uptime % 60):02d}", file=stream)
+>>>>>>> Stashed changes
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -449,6 +504,7 @@ def main(argv: list[str] | None = None) -> int:
     _check_fd_limits(config.concurrency)
 
     scheme = "https" if config.secure else "http"
+<<<<<<< Updated upstream
     output = sys.stderr if config.json_output else sys.stdout
     print(BANNER.format(
         ver=__version__,
@@ -456,6 +512,20 @@ def main(argv: list[str] | None = None) -> int:
         mode=config.mode,
         concurrency=config.concurrency,
     ), file=output)
+=======
+    # Route the banner to stderr in JSON mode so stdout stays a clean JSON stream.
+    banner_stream = sys.stderr if config.json_output else sys.stdout
+    print(
+        BANNER.format(
+            VER=__version__,
+            TARGET=f"{scheme}://{config.host}:{config.port}{config.path}",
+            BACKEND=config.backend,
+            MODE=config.mode,
+            CONCURRENCY=config.concurrency,
+        ),
+        file=banner_stream,
+    )
+>>>>>>> Stashed changes
 
     try:
         engine = asyncio.run(_run(config))
