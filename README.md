@@ -217,12 +217,12 @@ Emits one newline-delimited JSON object per interval:
 │  Connection │◄──────────────────│   Proxy     │
 │   Factory   │                   │   (SOCKS5/  │
 └──────┬──────┘                   │   SOCKS4/   │
-       │                           │   HTTP)     │
-       │                           └─────────────┘
+       │                          │   HTTP)     │
+       │                          └─────────────┘
        ▼
 ┌─────────────┐
 │   Target    │
-│  (HTTP/HTTPS)│
+│ (HTTP/HTTPS)│
 └─────────────┘
 ```
 
