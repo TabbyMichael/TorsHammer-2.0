@@ -1,18 +1,17 @@
 //! TorsHammer CLI entry point.
 //!
-//! `main.rs` is deliberately thin: it parses command-line options, decides
-//! between the version/help/run actions, and delegates all presentation to
-//! the `cli` module. There is no scanning logic here — the engine is expected
-//! to produce structured results that this layer renders.
+//! `main.rs` parses command-line options, decides between the
+//! version/help/run actions, and delegates presentation to the `cli` module
+//! while the real slow-request attack logic lives in the `engine` module.
 
 mod cli;
+mod engine;
 
 use cli::banner::{self, BannerMeta};
 use cli::help;
 use cli::output::Output;
-use cli::progress::{progress_line, Elapsed, Spinner, StepStatus, Symbols};
-use cli::table::Table;
 use cli::theme::{self, Theme};
+use engine::{url, EngineConfig};
 use std::process;
 
 /// Canonical program name used across the CLI surface.
@@ -28,17 +27,64 @@ fn platform_label() -> String {
 }
 
 /// Parsed runtime configuration for a scan invocation.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Config {
     target: String,
     backend: String,
     color: bool,
     unicode: bool,
     verbosity: i32,
+    // --- attack engine settings ---
+    concurrency: usize,
+    mode: String,
+    duration: f64,
+    delay_min: f64,
+    delay_max: f64,
+    connect_timeout: f64,
+    post_length: usize,
+    method: Option<String>,
+    path: Option<String>,
+    no_random_path: bool,
+    custom_headers: Vec<String>,
+    body_file: Option<String>,
+    json: bool,
+    stats_interval: f64,
+    max_errors: usize,
+    fail_under: usize,
+    fail_on_zero: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            target: String::new(),
+            backend: "rust".to_string(),
+            color: false,
+            unicode: true,
+            verbosity: 0,
+            concurrency: 256,
+            mode: "slow-post".to_string(),
+            duration: 0.0,
+            delay_min: 0.1,
+            delay_max: 3.0,
+            connect_timeout: 15.0,
+            post_length: 4096,
+            method: None,
+            path: None,
+            no_random_path: false,
+            custom_headers: Vec::new(),
+            body_file: None,
+            json: false,
+            stats_interval: 1.0,
+            max_errors: 0,
+            fail_under: 0,
+            fail_on_zero: false,
+        }
+    }
 }
 
 /// The action a given invocation maps to.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 enum Action {
     Run(Config),
     Help,
@@ -53,43 +99,49 @@ where
 {
     let args: Vec<String> = iter.into_iter().map(|a| a.as_ref().to_string()).collect();
 
-    let mut target: Option<String> = None;
-    let mut backend = "rust".to_string();
-    let mut color = theme::color_enabled(false);
-    let mut unicode = theme::unicode_enabled(false);
-    let mut verbosity = 0i32;
+    let mut cfg = Config::default();
+    cfg.color = theme::color_enabled(false);
+    cfg.unicode = theme::unicode_enabled(false);
     let mut show_help = false;
     let mut show_version = false;
 
     let mut i = 0;
-    let mut need_value: Option<&'static str> = None;
     while i < args.len() {
         let arg = args[i].as_str();
-        if let Some(flag) = need_value.take() {
-            match flag {
-                "--target" => target = Some(arg.to_string()),
-                "--backend" => backend = arg.to_string(),
-                _ => unreachable!("unknown value flag"),
-            }
-            i += 1;
-            continue;
-        }
         match arg {
-            "--target" | "-t" | "--url" | "-u" => need_value = Some("--target"),
-            "--backend" => need_value = Some("--backend"),
-            "--no-color" => color = false,
-            "--no-unicode" | "--ascii" => unicode = false,
-            "--debug" | "-v" => verbosity = 1,
-            "--quiet" | "-q" => verbosity = -1,
+            "--target" | "-t" | "--url" | "-u" => cfg.target = take_value(&args, &mut i, arg)?,
+            "--backend" => cfg.backend = take_value(&args, &mut i, arg)?,
+            "-c" | "--concurrency" => cfg.concurrency = parse_usize(take_value(&args, &mut i, arg)?, arg)?,
+            "-m" | "--mode" => cfg.mode = take_value(&args, &mut i, arg)?,
+            "-d" | "--duration" => cfg.duration = parse_f64(take_value(&args, &mut i, arg)?, arg)?,
+            "--delay-min" => cfg.delay_min = parse_f64(take_value(&args, &mut i, arg)?, arg)?,
+            "--delay-max" => cfg.delay_max = parse_f64(take_value(&args, &mut i, arg)?, arg)?,
+            "--connect-timeout" => {
+                cfg.connect_timeout = parse_f64(take_value(&args, &mut i, arg)?, arg)?
+            }
+            "--post-length" => cfg.post_length = parse_usize(take_value(&args, &mut i, arg)?, arg)?,
+            "--method" => cfg.method = Some(take_value(&args, &mut i, arg)?),
+            "--path" => cfg.path = Some(take_value(&args, &mut i, arg)?),
+            "--header" => cfg.custom_headers.push(take_value(&args, &mut i, arg)?),
+            "--body-file" => cfg.body_file = Some(take_value(&args, &mut i, arg)?),
+            "--stats-interval" => {
+                cfg.stats_interval = parse_f64(take_value(&args, &mut i, arg)?, arg)?
+            }
+            "--max-errors" => cfg.max_errors = parse_usize(take_value(&args, &mut i, arg)?, arg)?,
+            "--fail-under" => cfg.fail_under = parse_usize(take_value(&args, &mut i, arg)?, arg)?,
+            "--no-random-path" => cfg.no_random_path = true,
+            "--fail-on-zero" => cfg.fail_on_zero = true,
+            "--json" => cfg.json = true,
+            "--no-color" => cfg.color = false,
+            "--no-unicode" | "--ascii" => cfg.unicode = false,
+            "--debug" | "-v" => cfg.verbosity = 1,
+            "--quiet" | "-q" => cfg.verbosity = -1,
             "--help" | "-h" => show_help = true,
             "--version" | "-V" => show_version = true,
             _ if arg.starts_with('-') => return Err(format!("unknown option: {arg}")),
-            _ => target = Some(arg.to_string()),
+            _ => cfg.target = arg.to_string(),
         }
         i += 1;
-    }
-    if let Some(flag) = need_value {
-        return Err(format!("missing value for {flag}"));
     }
 
     if show_version {
@@ -98,14 +150,38 @@ where
     if show_help || args.is_empty() {
         return Ok(Action::Help);
     }
-    let target = target.ok_or_else(|| "a target is required; use --target or --url".to_string())?;
-    Ok(Action::Run(Config {
-        target,
-        backend,
-        color,
-        unicode,
-        verbosity,
-    }))
+    if cfg.target.is_empty() {
+        return Err("a target is required; use --target or --url".to_string());
+    }
+    Ok(Action::Run(cfg))
+}
+
+/// Consume the value that follows a value-taking flag.
+fn take_value(args: &[String], index: &mut usize, flag: &str) -> Result<String, String> {
+    *index += 1;
+    args.get(*index)
+        .cloned()
+        .ok_or_else(|| format!("missing value for {flag}"))
+}
+
+fn parse_usize(raw: String, flag: &str) -> Result<usize, String> {
+    raw.parse::<usize>()
+        .map_err(|_| format!("invalid numeric value for {flag}: {raw}"))
+}
+
+fn parse_f64(raw: String, flag: &str) -> Result<f64, String> {
+    raw.parse::<f64>()
+        .map_err(|_| format!("invalid numeric value for {flag}: {raw}"))
+}
+
+/// Split `"Name: value"` strings into `(name, value)` pairs.
+fn parse_headers(raw: &[String]) -> Vec<(String, String)> {
+    raw.iter()
+        .filter_map(|h| {
+            h.split_once(':')
+                .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
+        })
+        .collect()
 }
 
 /// `TorsHammer <version>` — the canonical `--version` line.
@@ -113,8 +189,7 @@ pub fn version_line() -> String {
     format!("{PROGRAM} {VERSION}")
 }
 
-/// Render and run a scan session. The Rust engine is a scaffold, so this
-/// prints the branded header and a readiness summary only.
+/// Render the banner, build the engine config, and run the attack.
 fn run_scan(cfg: &Config) -> i32 {
     let mut output = Output::new(cfg.color, cfg.verbosity);
     let theme: Theme = if cfg.color {
@@ -122,12 +197,6 @@ fn run_scan(cfg: &Config) -> i32 {
     } else {
         Theme::plain()
     };
-    let symbols = if cfg.unicode {
-        Symbols::unicode()
-    } else {
-        Symbols::ascii()
-    };
-    let elapsed = Elapsed::start();
 
     let meta = BannerMeta {
         version: VERSION,
@@ -142,44 +211,86 @@ fn run_scan(cfg: &Config) -> i32 {
     let _ = output.raw(&banner::render(&theme, &meta, cfg.color));
     let _ = output.info("Initializing TorsHammer CLI...");
 
-    // Step lifecycle: pending -> running -> done.
-    let _ = output.raw(&StepStatus::Pending.line(symbols, "Initializing scanner"));
-    let _ = output.raw(&StepStatus::Running.line(symbols, "Preparing target"));
-    let _ = output.raw(&StepStatus::Done.line(symbols, "Target ready"));
+    let target = match url::parse(&cfg.target) {
+        Ok(target) => target,
+        Err(err) => {
+            let _ = output.error(&err);
+            let _ = output.raw(help::error_hint());
+            return 2;
+        }
+    };
 
-    let _ = output.success("CLI layer initialized (Rust backend)");
-    let _ = output.warning("Rust engine not yet implemented; branded scaffold only");
+    if target.scheme == "https" {
+        let _ = output.error(
+            "https is not yet supported by the Rust engine; use the python backend \
+             (--backend python) or point at an http target.",
+        );
+        return 2;
+    }
 
-    // Spinner + progress bar demo of the reusable status components.
-    let mut spinner = Spinner::new(cfg.unicode);
-    let _ = output.raw(&format!("[{}] Scanning...", spinner.tick()));
-    let _ = output.raw(&format!("[{}] finished", spinner.done_symbol()));
-    let _ = output.raw(&progress_line(0.42, 20, cfg.unicode));
+    const MODES: [&str; 6] = [
+        "slow-post",
+        "slow-post-headers",
+        "slow-headers",
+        "slow-read",
+        "chunked",
+        "udp",
+    ];
+    if !MODES.contains(&cfg.mode.as_str()) {
+        let _ = output.error(&format!(
+            "unknown attack mode: {} (choose slow-post, slow-post-headers, slow-headers, slow-read, chunked, udp)",
+            cfg.mode
+        ));
+        return 2;
+    }
 
-    let _ = output.debug(&format!(
-        "color={} unicode={} verbosity={}",
-        cfg.color, cfg.unicode, cfg.verbosity
-    ));
+    let path = cfg.path.clone().unwrap_or_else(|| target.path.clone());
+    let custom_body = match &cfg.body_file {
+        Some(file) => match std::fs::read(file) {
+            Ok(bytes) => {
+                let _ = output.info(&format!("Loaded custom body from {file} ({} bytes)", bytes.len()));
+                Some(bytes)
+            }
+            Err(err) => {
+                let _ = output.error(&format!("cannot read body file {file}: {err}"));
+                return 2;
+            }
+        },
+        None => None,
+    };
 
-    // Structured demo output: the CLI renders engine data, it never scans.
-    let mut table = Table::new(["PORT", "STATE", "SERVICE"]).with_unicode(cfg.unicode);
-    table.add_row(["22", "OPEN", "SSH"]);
-    table.add_row(["80", "OPEN", "HTTP"]);
-    table.add_row(["443", "OPEN", "HTTPS"]);
-    let _ = output.raw("");
-    let _ = output.result("Demo results (engine pending):");
-    let _ = output.raw("");
-    let _ = output.raw(&table.render(80));
-    let _ = output.raw("");
+    let engine_cfg = EngineConfig {
+        host: target.host.clone(),
+        port: target.port,
+        path,
+        header_host: target.header_host.clone(),
+        secure: target.scheme == "https",
+        mode: cfg.mode.clone(),
+        concurrency: cfg.concurrency.max(1),
+        duration: cfg.duration.max(0.0),
+        delay_min: cfg.delay_min,
+        delay_max: cfg.delay_max,
+        connect_timeout: cfg.connect_timeout,
+        base_post_length: cfg.post_length.max(1),
+        randomize_path: !cfg.no_random_path,
+        method: cfg.method.clone(),
+        custom_headers: parse_headers(&cfg.custom_headers),
+        custom_body,
+        json: cfg.json,
+        stats_interval: cfg.stats_interval,
+        quiet: cfg.verbosity < 0,
+        verbose: cfg.verbosity > 0,
+        max_errors: cfg.max_errors,
+        fail_under: cfg.fail_under,
+        fail_on_zero: cfg.fail_on_zero,
+    };
 
+    let _ = output.success("Rust engine initialized");
     let _ = output.info(&format!(
-        "Platform {} | Backend {} | Elapsed {} ({}s)",
-        platform_label(),
-        cfg.backend,
-        elapsed.as_display(),
-        elapsed.as_secs()
+        "target={} mode={} concurrency={}",
+        target.header_host, engine_cfg.mode, engine_cfg.concurrency
     ));
-    0
+    engine::run(engine_cfg)
 }
 
 /// Top-level dispatch. Returns the process exit code.

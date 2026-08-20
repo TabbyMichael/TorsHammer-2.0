@@ -37,6 +37,26 @@ pub fn render(program: &str, version: &str, theme: &Theme, color: bool) -> Strin
             "--backend <NAME>",
             "Runtime backend: python | rust [default: rust]",
         ),
+        ("-c, --concurrency <N>", "Concurrent connections [default: 256]"),
+        (
+            "-m, --mode <NAME>",
+            "Attack profile: slow-post | slow-post-headers | slow-headers | slow-read | chunked | udp",
+        ),
+        ("-d, --duration <SECS>", "Attack duration in seconds (0 = unlimited)"),
+        ("--delay-min <SECS>", "Minimum byte-dribble delay [default: 0.1]"),
+        ("--delay-max <SECS>", "Maximum byte-dribble delay [default: 3.0]"),
+        ("--connect-timeout <SECS>", "Connection timeout [default: 15]"),
+        ("--post-length <N>", "Baseline slow-post content length [default: 4096]"),
+        ("--method <VERB>", "Override the HTTP method (GET, POST, PUT, ...)"),
+        ("--path <PATH>", "Override the request path [default: from target]"),
+        ("--no-random-path", "Do not append a random query token"),
+        ("--header <NAME:VALUE>", "Add a custom header (repeatable)"),
+        ("--body-file <FILE>", "Custom POST body for slow-post/chunked modes"),
+        ("--json", "Emit JSON stats lines (to stderr)"),
+        ("--stats-interval <SECS>", "Stats reporting interval [default: 1.0]"),
+        ("--max-errors <N>", "Circuit-breaker: exit after N consecutive errors"),
+        ("--fail-under <N>", "Exit non-zero if peak active connections < N"),
+        ("--fail-on-zero", "Exit non-zero if no connections were opened"),
         ("--no-color", "Disable colored output"),
         ("--no-unicode", "Use ASCII symbols instead of Unicode"),
         ("--debug", "Enable debug output"),
@@ -45,14 +65,15 @@ pub fn render(program: &str, version: &str, theme: &Theme, color: bool) -> Strin
         ("-V, --version", "Print version and exit"),
     ];
     for (flag, help) in options {
-        out.push_str(&format!("  {flag:<24}{help}\n"));
+        out.push_str(&format!("  {flag:<28}{help}\n"));
     }
     out.push('\n');
 
     out.push_str(&theme.subtitle.paint("Examples", color));
     out.push('\n');
     out.push_str("  torshammer --target http://localhost --backend rust\n");
-    out.push_str("  torshammer --url https://example.com/api/ --no-color\n");
+    out.push_str("  torshammer -u http://localhost -c 512 -m slow-headers -d 30\n");
+    out.push_str("  torshammer --url http://example.com/api/ --no-color --method PUT\n");
     out.push('\n');
 
     out.push_str(&theme.subtitle.paint("Configuration", color));

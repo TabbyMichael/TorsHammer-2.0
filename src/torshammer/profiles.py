@@ -56,7 +56,8 @@ def _path(config: Config) -> str:
     if not config.randomize_path:
         return config.path
     separator = "&" if "?" in config.path else "?"
-    return f"{config.path}{separator}{secrets.token_urlsafe(6)}"
+    random_token = "".join(random.choice(string.ascii_letters + string.digits) for _ in range(9))
+    return f"{config.path}{separator}{random_token}"
 
 
 def _base_headers(config: Config, ua: str) -> list[str]:
