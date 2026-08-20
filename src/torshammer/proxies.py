@@ -104,6 +104,8 @@ class ProxyPool:
         self._cycle = itertools.cycle(self._proxies) if self._proxies else None
         self._rotate = rotate
         self._max_failures = max_failures
+        self._healthy_cycle: itertools.cycle[Proxy] | None = None
+        self._healthy_key: tuple[tuple[str, int], ...] | None = None
 
     def _reset_cycle(self) -> None:
         self._cycle = itertools.cycle(self._proxies) if self._proxies else None
@@ -123,11 +125,15 @@ class ProxyPool:
 
         # For round-robin, cycle through healthy proxies first
         if healthy_proxies:
-            # Reset cycle to healthy proxies if it was set to all
-            if not hasattr(self, '_healthy_cycle') or len(list(self._healthy_cycle)) != len(healthy_proxies):
+            # Rebuild the cycle only when the healthy set composition changes
+            # (itertools.cycle is infinite, so never inspect it via list()).
+            key = tuple((p.host, p.port) for p in healthy_proxies)
+            if self._healthy_cycle is None or key != self._healthy_key:
                 self._healthy_cycle = itertools.cycle(healthy_proxies)
+                self._healthy_key = key
             return next(self._healthy_cycle)
         else:
+            assert self._cycle is not None  # guarded by `if not self._proxies` above
             return next(self._cycle)
 
     def record_success(self, proxy: Proxy) -> None:

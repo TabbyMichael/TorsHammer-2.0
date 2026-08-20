@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import secrets
 import string
 from abc import ABC, abstractmethod
 
@@ -52,8 +53,11 @@ def _random_header_name(name: str) -> str:
 
 
 def _path(config: Config) -> str:
+    if not config.randomize_path:
+        return config.path
     separator = "&" if "?" in config.path else "?"
-    return f"{config.path}{separator}{secrets.token_urlsafe(6)}"
+    random_token = "".join(random.choice(string.ascii_letters + string.digits) for _ in range(9))
+    return f"{config.path}{separator}{random_token}"
 
 
 def _base_headers(config: Config, ua: str) -> list[str]:
@@ -80,11 +84,12 @@ def _base_headers(config: Config, ua: str) -> list[str]:
     if random.random() < 0.4:
         headers.append(f"X-Trace-Id: {secrets.token_hex(6)}")
 
-    # Add custom headers (skip critical headers that shouldn't be overridden)
-    critical_headers = {"host", "user-agent", "connection"}
+    # Add custom headers (override defaults if present)
     for name, value in config.custom_headers.items():
-        if name.lower() not in critical_headers:
-            headers.append(f"{name}: {value}")
+        name_lower = name.lower()
+        # Remove any existing header with same name (case-insensitive)
+        headers = [h for h in headers if not h.lower().startswith(f"{name_lower}:")]
+        headers.append(f"{name}: {value}")
 
     return headers
 
@@ -201,8 +206,8 @@ class SlowHeaders(Profile):
         await _write(writer, req, stats)
         # Send custom headers first (if any), then random X-headers
         if config.custom_headers:
-            for header in config.custom_headers:
-                await _write(writer, (header + "\r\n").encode(), stats)
+            for name, value in config.custom_headers.items():
+                await _write(writer, f"{name}: {value}\r\n".encode(), stats)
                 await _halt(stop, config)
         while not stop.is_set():
             key = f"X-{_rand_hex(6)}"

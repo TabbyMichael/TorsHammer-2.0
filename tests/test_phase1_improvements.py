@@ -8,10 +8,9 @@ import sys
 
 import pytest
 
-from torshammer.cli import _resolve_config, _print_summary, build_parser
+from torshammer.cli import _print_summary, _resolve_config, build_parser
 from torshammer.config import Config
 from torshammer.stats import Stats, human_size
-
 
 # ============================================================================
 # 1.1 JSON Output Pollution Fix
@@ -21,7 +20,7 @@ from torshammer.stats import Stats, human_size
 def test_banner_goes_to_stderr_with_json_flag():
     """Banner should print to stderr when --json is used."""
     parser = build_parser()
-    args = parser.parse_args(["-u", "http://example.com", "--json"])
+    args = parser.parse_args(["-u", "http://example.com", "--json", "--allow-public-targets"])
     config = _resolve_config(args)
     
     old_stderr = sys.stderr
@@ -262,6 +261,7 @@ def test_custom_headers_via_cli():
     parser = build_parser()
     args = parser.parse_args([
         "-u", "http://example.com",
+        "--allow-public-targets",
         "--header", "X-Custom: value1",
         "--header", "Authorization: Bearer token123"
     ])
@@ -285,6 +285,7 @@ def test_custom_body_from_file(tmp_path):
     parser = build_parser()
     args = parser.parse_args([
         "-u", "http://example.com",
+        "--allow-public-targets",
         "--body-file", str(body_file)
     ])
     config = _resolve_config(args)
@@ -304,6 +305,7 @@ def test_proxy_env_variable(monkeypatch):
     parser = build_parser()
     args = parser.parse_args([
         "-u", "http://example.com",
+        "--allow-public-targets",
         "--proxy-env", "MY_PROXY_URL"
     ])
     config = _resolve_config(args)
