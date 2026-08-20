@@ -22,7 +22,7 @@ def test_banner_goes_to_stderr_with_json_flag():
     parser = build_parser()
     args = parser.parse_args(["-u", "http://example.com", "--json", "--allow-public-targets"])
     config = _resolve_config(args)
-    
+
     old_stderr = sys.stderr
     sys.stderr = io.StringIO()
     try:
@@ -31,7 +31,7 @@ def test_banner_goes_to_stderr_with_json_flag():
         stderr_content = sys.stderr.getvalue()
     finally:
         sys.stderr = old_stderr
-    
+
     assert "BANNER_TEST" in stderr_content
 
 
@@ -45,7 +45,7 @@ def test_summary_goes_to_stderr_with_json_flag():
         stderr_content = sys.stderr.getvalue()
     finally:
         sys.stderr = old_stderr
-    
+
     assert "connections opened" in stderr_content
 
 
@@ -57,7 +57,7 @@ def test_summary_goes_to_stderr_with_json_flag():
 def test_path_without_query_gets_question_mark():
     """Paths without existing query should get ? separator."""
     from torshammer.profiles import _path
-    
+
     config = Config(host="example.com", port=80, path="/api")
     result = _path(config)
     assert result.startswith("/api?")
@@ -66,7 +66,7 @@ def test_path_without_query_gets_question_mark():
 def test_path_with_query_gets_ampersand():
     """Paths with existing query should get & separator."""
     from torshammer.profiles import _path
-    
+
     config = Config(host="example.com", port=80, path="/api?key=value")
     result = _path(config)
     assert result.startswith("/api?key=value&")
@@ -84,7 +84,7 @@ def test_ipv6_literal_wrapped_in_brackets():
     parser = build_parser()
     args = parser.parse_args(["-u", "http://[::1]:8080/path"])
     config = _resolve_config(args)
-    
+
     assert config.host == "::1"
     assert config.header_host == "[::1]:8080"
 
@@ -94,7 +94,7 @@ def test_ipv6_literal_without_port():
     parser = build_parser()
     args = parser.parse_args(["-u", "http://[::1]/path"])
     config = _resolve_config(args)
-    
+
     assert config.host == "::1"
     assert config.header_host == "[::1]"
 
@@ -104,7 +104,7 @@ def test_ipv6_with_https():
     parser = build_parser()
     args = parser.parse_args(["-u", "https://[2001:db8::1]:8443/path"])
     config = _resolve_config(args)
-    
+
     assert config.host == "2001:db8::1"
     assert config.header_host == "[2001:db8::1]:8443"
     assert config.secure is True
@@ -115,7 +115,7 @@ def test_ipv4_not_wrapped():
     parser = build_parser()
     args = parser.parse_args(["-u", "http://192.168.1.1:8080/path"])
     config = _resolve_config(args)
-    
+
     assert config.host == "192.168.1.1"
     assert config.header_host == "192.168.1.1:8080"
 
@@ -157,10 +157,10 @@ def test_concurrency_less_than_one_raises():
 def test_ssl_context_caching():
     """SSL context should be cached and reused."""
     config = Config(host="example.com", port=443, secure=True)
-    
+
     ctx1 = config.ssl_context()
     ctx2 = config.ssl_context()
-    
+
     assert ctx1 is ctx2  # Same object (cached)
 
 
@@ -179,7 +179,7 @@ def test_ssl_context_none_for_http():
 def test_fd_limits_check_exists():
     """_check_fd_limits function should exist and be importable."""
     from torshammer.cli import _check_fd_limits
-    
+
     assert callable(_check_fd_limits)
     _check_fd_limits(256)  # Should not raise for reasonable concurrency
 
@@ -194,7 +194,7 @@ async def test_circuit_breaker_triggers():
     """Engine should trigger circuit breaker after max_errors."""
     from torshammer.config import Config
     from torshammer.engine import AttackEngine
-    
+
     cfg = Config(
         host="192.0.2.1",  # TEST-NET-1, will fail
         port=12345,
@@ -207,10 +207,10 @@ async def test_circuit_breaker_triggers():
         quiet=True,
         max_errors=3,
     )
-    
+
     engine = AttackEngine(cfg, asyncio.Event())
     await engine.run()
-    
+
     # With 8 workers trying to connect and failing, should hit circuit breaker
     assert engine.stats.errors >= 3
 
@@ -223,17 +223,17 @@ async def test_circuit_breaker_triggers():
 def test_proxy_health_tracking():
     """Proxy should track failures and support health checks."""
     from torshammer.proxies import Proxy
-    
+
     proxy = Proxy("socks5", "proxy.example.com", 9050)
     assert proxy.is_healthy() is True
-    
+
     # Record several failures
     for _ in range(5):
         proxy.record_failure()
-    
+
     # Should now be unhealthy
     assert proxy.is_healthy() is False
-    
+
     # Record success should reset
     proxy.record_success()
     assert proxy.is_healthy() is True
@@ -242,10 +242,10 @@ def test_proxy_health_tracking():
 def test_proxy_stats():
     """Proxy should provide stats for JSON output."""
     from torshammer.proxies import Proxy
-    
+
     proxy = Proxy("socks5", "proxy.example.com", 9050, "user", "pass")
     stats = proxy.get_stats()
-    
+
     assert stats["proxy"] == "socks5://proxy.example.com:9050"
     assert stats["failures"] == 0
     assert stats["healthy"] is True
@@ -259,14 +259,19 @@ def test_proxy_stats():
 def test_custom_headers_via_cli():
     """Custom headers should be parsed from --header flag."""
     parser = build_parser()
-    args = parser.parse_args([
-        "-u", "http://example.com",
-        "--allow-public-targets",
-        "--header", "X-Custom: value1",
-        "--header", "Authorization: Bearer token123"
-    ])
+    args = parser.parse_args(
+        [
+            "-u",
+            "http://example.com",
+            "--header",
+            "X-Custom: value1",
+            "--header",
+            "Authorization: Bearer token123",
+            "--allow-public-targets",
+        ]
+    )
     config = _resolve_config(args)
-    
+
     assert "X-Custom" in config.custom_headers
     assert config.custom_headers["X-Custom"] == "value1"
 
@@ -281,15 +286,19 @@ def test_custom_body_from_file(tmp_path):
     body_file = tmp_path / "body.txt"
     body_content = b"custom POST data here"
     body_file.write_bytes(body_content)
-    
+
     parser = build_parser()
-    args = parser.parse_args([
-        "-u", "http://example.com",
-        "--allow-public-targets",
-        "--body-file", str(body_file)
-    ])
+    args = parser.parse_args(
+        [
+            "-u",
+            "http://example.com",
+            "--body-file",
+            str(body_file),
+            "--allow-public-targets",
+        ]
+    )
     config = _resolve_config(args)
-    
+
     assert config.custom_body == body_content
 
 
@@ -301,15 +310,19 @@ def test_custom_body_from_file(tmp_path):
 def test_proxy_env_variable(monkeypatch):
     """Proxy URL should be read from environment variable."""
     monkeypatch.setenv("MY_PROXY_URL", "socks5://user:pass@proxy:9050")
-    
+
     parser = build_parser()
-    args = parser.parse_args([
-        "-u", "http://example.com",
-        "--allow-public-targets",
-        "--proxy-env", "MY_PROXY_URL"
-    ])
+    args = parser.parse_args(
+        [
+            "-u",
+            "http://example.com",
+            "--proxy-env",
+            "MY_PROXY_URL",
+            "--allow-public-targets",
+        ]
+    )
     config = _resolve_config(args)
-    
+
     assert config.proxies is not None
     assert len(config.proxies) == 1
     assert config.proxies[0].username == "user"

@@ -52,13 +52,49 @@ def test_pool_empty_returns_none():
     assert ProxyPool([]).next() is None
 
 
-def test_proxy_pool_removes_failed_proxy():
-    proxies = [Proxy("socks5", "a", 1), Proxy("socks5", "b", 2)]
-    pool = ProxyPool(proxies, rotate=False, max_failures=2)
-    proxy = pool.next()
-    assert proxy.host == "a"
-    pool.report_failure(proxy)
+def test_unhealthy_proxy_is_skipped_until_recovery():
+    """Deprioritized proxies stay in the pool and recover after cooldown.
+
+    Tests the unified health model: a proxy that exceeds failure_threshold is
+    skipped in favour of healthy proxies, but is NEVER removed (so it can recover
+    after recovery_time seconds).  We inject tiny thresholds so the test runs fast.
+    """
+    a = Proxy("socks5", "a", 1, failure_threshold=2, recovery_time=0.05)
+    b = Proxy("socks5", "b", 2, failure_threshold=2, recovery_time=0.05)
+    pool = ProxyPool([a, b], rotate=False)
+
+    # Both healthy initially — pool size unchanged throughout
     assert len(pool) == 2
-    pool.report_failure(proxy)
-    assert len(pool) == 1
+    assert pool.next().host == "a"
+
+    # Exhaust proxy a's threshold
+    pool.record_failure(a)
+    pool.record_failure(a)
+    assert not a.is_healthy()
+
+    # Pool should prefer b while a is deprioritized
     assert pool.next().host == "b"
+    assert pool.next().host == "b"
+
+    # Pool still contains both (no removal)
+    assert len(pool) == 2
+
+    # After the recovery window, a should be healthy again
+    import time
+
+    time.sleep(0.06)  # > recovery_time=0.05
+    assert a.is_healthy()
+    # Round-robin should now include a again
+    seen = {pool.next().host for _ in range(4)}
+    assert "a" in seen
+
+
+def test_round_robin_does_not_hang():
+    """next() with healthy proxies in round-robin must return promptly — regression
+    guard against the former len(list(infinite_cycle)) hang."""
+    proxies = [Proxy("socks5", str(i), i) for i in range(5)]
+    pool = ProxyPool(proxies, rotate=False)
+    # Call next() many times quickly; if this hangs the test suite will time out
+    results = [pool.next().host for _ in range(15)]
+    assert results[:5] == [str(i) for i in range(5)]
+    assert results[5:10] == results[:5]  # second cycle

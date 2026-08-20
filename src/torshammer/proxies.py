@@ -26,13 +26,13 @@ class Proxy:
     port: int
     username: str | None = None
     password: str | None = None
+    # Health tuning (instance-level so tests and callers can inject values).
+    failure_threshold: int = 5  # temporarily deprioritize after N consecutive failures
+    recovery_time: float = 300.0  # seconds to wait before considering a proxy recovered
     # Health tracking fields
     failures: int = field(default=0, init=False, repr=False)
     last_failure: float = field(default=0.0, init=False, repr=False)
     last_success: float = field(default=0.0, init=False, repr=False)
-
-    FAILURE_THRESHOLD = 5  # Temporarily deprioritize after N failures
-    RECOVERY_TIME = 300.0  # 5 minutes before considering recovery
 
     def record_success(self) -> None:
         """Record a successful connection through this proxy."""
@@ -46,10 +46,10 @@ class Proxy:
 
     def is_healthy(self) -> bool:
         """Check if proxy is considered healthy (not temporarily deprioritized)."""
-        if self.failures < self.FAILURE_THRESHOLD:
+        if self.failures < self.failure_threshold:
             return True
         # Allow recovery after cooldown period
-        return (time.monotonic() - self.last_failure) > self.RECOVERY_TIME
+        return (time.monotonic() - self.last_failure) > self.recovery_time
 
     def get_stats(self) -> dict:
         """Get proxy statistics for JSON output."""
@@ -58,7 +58,7 @@ class Proxy:
             "failures": self.failures,
             "last_success": self.last_success,
             "last_failure": self.last_failure,
-            "healthy": self.is_healthy()
+            "healthy": self.is_healthy(),
         }
 
     @classmethod
@@ -95,69 +95,48 @@ class ProxyPool:
 
     ``rotate`` selects a random proxy per connection (useful to spread
     connections across Tor circuits / a proxy list); otherwise proxies are
-    returned round-robin. Unhealthy proxies are temporarily deprioritized.
+    returned round-robin. Unhealthy proxies are temporarily deprioritized;
+    they are never removed so they can recover after their cooldown period.
     """
 
-    def __init__(self, proxies: list[Proxy] | None, rotate: bool = False, max_failures: int = 3):
+    def __init__(self, proxies: list[Proxy] | None, rotate: bool = False):
         self._proxies = proxies or []
-        self._failures = [0] * len(self._proxies)
-        self._cycle = itertools.cycle(self._proxies) if self._proxies else None
         self._rotate = rotate
-        self._max_failures = max_failures
-        self._healthy_cycle: itertools.cycle[Proxy] | None = None
-        self._healthy_key: tuple[tuple[str, int], ...] | None = None
-
-    def _reset_cycle(self) -> None:
-        self._cycle = itertools.cycle(self._proxies) if self._proxies else None
+        self._cycle: itertools.cycle | None = None
+        # The set of proxies the current round-robin cycle was built from
+        # (stable object-identity key), so we rebuild the cycle only when the
+        # healthy pool actually changes membership.
+        self._cycle_key: tuple[int, ...] | None = None
 
     def next(self) -> Proxy | None:
         if not self._proxies:
             return None
 
-        # Get healthy proxies
-        healthy_proxies = [p for p in self._proxies if p.is_healthy()]
+        healthy = [p for p in self._proxies if p.is_healthy()]
+        # Prefer healthy proxies; fall back to all so a fully-deprioritized
+        # pool keeps retrying (rather than starving the attack).
+        available = healthy if healthy else self._proxies
 
-        # If no healthy proxies, fall back to all proxies
-        available = healthy_proxies if healthy_proxies else self._proxies
+        if self._rotate:
+            return random.choice(available) if available else None
 
-        if self._rotate and len(available) > 1:
-            return random.choice(available)
-
-        # For round-robin, cycle through healthy proxies first
-        if healthy_proxies:
-            # Rebuild the cycle only when the healthy set composition changes
-            # (itertools.cycle is infinite, so never inspect it via list()).
-            key = tuple((p.host, p.port) for p in healthy_proxies)
-            if self._healthy_cycle is None or key != self._healthy_key:
-                self._healthy_cycle = itertools.cycle(healthy_proxies)
-                self._healthy_key = key
-            return next(self._healthy_cycle)
-        else:
-            assert self._cycle is not None  # guarded by `if not self._proxies` above
-            return next(self._cycle)
+        key = tuple(id(p) for p in available)
+        if self._cycle is None or self._cycle_key != key:
+            self._cycle = itertools.cycle(available) if available else None
+            self._cycle_key = key
+        return next(self._cycle) if self._cycle else None
 
     def record_success(self, proxy: Proxy) -> None:
         """Record successful connection through proxy."""
         proxy.record_success()
 
     def record_failure(self, proxy: Proxy) -> None:
-        """Record failed connection through proxy."""
+        """Record failed connection through proxy (deprioritize, don't remove)."""
         proxy.record_failure()
 
     def get_all_stats(self) -> list[dict]:
         """Get statistics for all proxies."""
         return [p.get_stats() for p in self._proxies]
-
-    def report_failure(self, proxy: Proxy) -> None:
-        try:
-            idx = self._proxies.index(proxy)
-        except ValueError:
-            return
-        self._failures[idx] += 1
-        if self._failures[idx] >= self._max_failures:
-            del self._proxies[idx]
-            del self._failures[idx]
-            self._reset_cycle()
 
     def __len__(self) -> int:
         return len(self._proxies)

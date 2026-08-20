@@ -8,6 +8,9 @@ import ipaddress
 import os
 import re
 import resource
+import random
+import re
+import shutil
 import signal
 import sys
 import time
@@ -31,7 +34,7 @@ try:
     with open(_banner_path, encoding="utf-8") as _f:
         BANNER = _f.read()
 except (OSError, UnicodeDecodeError):
-    BANNER = """  TorsHammer {VER} - slow-requests DoS/Vulnerability testing tool\n\nTarget : {TARGET}\nBackend : {BACKEND}\nMode   : {MODE}\nConns  : {CONCURRENCY}\n\n"""
+    BANNER = """  TorsHammer {__version__} - slow-requests DoS/Vulnerability testing tool\n\nTarget : {target}\nBackend : {backend}\nMode   : {mode}\nConns  : {concurrency}\n\n"""
 
 
 class CustomHeadersDict(dict):
@@ -74,7 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--backend",
         choices=["python", "rust"],
         default="python",
-        help="Select the runtime backend; rust is an alternate high-performance implementation.",
+        help=(
+            "Select the runtime backend (python is the reference implementation; "
+            "rust is reserved for a future high-performance backend). Selecting "
+            "rust logs a warning and falls back to python when the Rust binary "
+            "is not installed."
+        ),
     )
     target.add_argument(
         "--allow-public-targets",
@@ -90,6 +98,22 @@ def build_parser() -> argparse.ArgumentParser:
     attack = parser.add_argument_group("attack")
     attack.add_argument(
         "-m", "--mode", choices=sorted(PROFILES) + ["udp"], default="slow-post"
+    )
+    attack.add_argument(
+        "--method",
+        metavar="VERB",
+        help="Override HTTP method (default depends on mode: POST for slow-post/chunked, GET otherwise)",
+    )
+    attack.add_argument(
+        "--path",
+        metavar="PATH",
+        help="Override the request path (default: path from --url, or '/')",
+    )
+    attack.add_argument(
+        "--no-random-path",
+        action="store_true",
+        default=False,
+        help="Disable per-request random token appended to the path",
     )
     attack.add_argument(
         "-c",
@@ -118,12 +142,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     attack.add_argument("--connect-timeout", type=float, default=15.0, metavar="SEC")
     attack.add_argument(
-        "--max-errors", type=int, default=0,
-        help="Exit after N consecutive errors (0 = disabled, for CI integration)"
+        "--max-errors",
+        type=int,
+        default=0,
+        help="Exit after N consecutive errors (0 = disabled, for CI integration)",
     )
     attack.add_argument(
-        "--ramp-up", type=int, default=0,
-        help="Stagger worker starts (N workers per second, 0 = start all immediately)"
+        "--ramp-up",
+        type=int,
+        default=0,
+        help="Stagger worker starts (N workers per second, 0 = start all immediately)",
     )
 
     proxy_group = parser.add_argument_group("proxy / Tor")
@@ -131,9 +159,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--tor", action="store_true", help="Route via Tor SOCKS5 at 127.0.0.1:9050"
     )
     proxy_group.add_argument("--proxy", help="Proxy URL, e.g. socks5://user:pass@host:9050")
-    proxy_group.add_argument("--proxy-list", metavar="FILE", help="File with one proxy URL per line")
-    proxy_group.add_argument("--proxy-env", metavar="VAR", help="Read proxy URL from environment variable")
-    proxy_group.add_argument("--rotate-proxies", action="store_true", help="Pick a random proxy per connection")
+    proxy_group.add_argument(
+        "--proxy-list", metavar="FILE", help="File with one proxy URL per line"
+    )
+    proxy_group.add_argument(
+        "--proxy-env", metavar="VAR", help="Read proxy URL from environment variable"
+    )
+    proxy_group.add_argument(
+        "--rotate-proxies", action="store_true", help="Pick a random proxy per connection"
+    )
 
     output = parser.add_argument_group("output")
     output.add_argument("--stats-interval", type=float, default=1.0, metavar="SEC")
@@ -141,29 +175,40 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", dest="json_output", help="Emit newline-delimited JSON stats"
     )
     output.add_argument("-q", "--quiet", action="store_true", help="Suppress the live status line")
-    output.add_argument("-v", "--verbose", action="count", default=0, help="Print per-error details")
-    output.add_argument("--user-agents", metavar="FILE", help="File with one User-Agent string per line")
+    output.add_argument(
+        "-v", "--verbose", action="count", default=0, help="Print per-error details"
+    )
+    output.add_argument(
+        "--user-agents", metavar="FILE", help="File with one User-Agent string per line"
+    )
 
     custom = parser.add_argument_group("customization")
-    custom.add_argument("--header", action="append", metavar="NAME:VALUE",
-                       help="Add custom HTTP header (can be repeated)")
-    custom.add_argument("--header-file", metavar="FILE",
-                       help="Load custom headers from file (one 'Name: Value' per line)")
-    custom.add_argument("--body-file", metavar="FILE",
-                       help="Load custom POST body from file (for slow-post/chunked modes)")
-    custom.add_argument("--path", help="Custom URL path to request (default: auto from --url)")
-    custom.add_argument("--method", help="HTTP method override (GET, POST, PUT, etc.)")
-    custom.add_argument("--no-random-path", action="store_true", dest="no_random_path",
-                       help="Disable random query-string appending to the request path")
-
-    proxy_group.add_argument("--proxy-max-failures", type=int, metavar="N", default=5,
-                            help="Remove proxy after N failures (default: 5)")
+    custom.add_argument(
+        "--header",
+        action="append",
+        metavar="NAME:VALUE",
+        help="Add custom HTTP header (can be repeated)",
+    )
+    custom.add_argument(
+        "--header-file",
+        metavar="FILE",
+        help="Load custom headers from file (one 'Name: Value' per line)",
+    )
+    custom.add_argument(
+        "--body-file",
+        metavar="FILE",
+        help="Load custom POST body from file (for slow-post/chunked modes)",
+    )
 
     automation = parser.add_argument_group("automation")
-    automation.add_argument("--fail-under", type=int, metavar="N", default=0,
-                          help="Exit with error if peak active connections < N (default: 0 = disabled)")
-    automation.add_argument("--fail-on-zero", action="store_true",
-                          help="Exit with error if zero connections were opened")
+    automation.add_argument(
+        "--fail-under", type=int, metavar="N", help="Exit with error if peak active connections < N"
+    )
+    automation.add_argument(
+        "--fail-on-zero",
+        action="store_true",
+        help="Exit with error if zero connections were opened",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -225,6 +270,28 @@ def _parse_custom_headers(raw_headers: list[str]) -> list[str]:
     return headers
 
 
+def _resolve_backend(requested: str) -> str:
+    """Resolve the runtime backend, warning and falling back to Python if rust is requested but unavailable.
+
+    The Rust backend is not yet implemented as an attack engine. If the user
+    explicitly selects ``--backend rust`` we check for the ``torshammer-rust``
+    binary on PATH. If it is absent (the common case today), we log a clear
+    warning to stderr and fall back to the Python reference engine so the run
+    can proceed. This avoids silently running the Python engine when the user
+    intended the Rust backend.
+    """
+    if requested == "python":
+        return "python"
+    if shutil.which("torshammer-rust") is not None:
+        return "rust"
+    print(
+        "  [warn] --backend rust requested but 'torshammer-rust' binary not found"
+        " on PATH. Falling back to the python reference engine.",
+        file=sys.stderr,
+    )
+    return "python"
+
+
 def _resolve_config(args: argparse.Namespace) -> Config:
     url = args.url or args.target
     host: str | None = None
@@ -276,6 +343,9 @@ def _resolve_config(args: argparse.Namespace) -> Config:
         port = args.port
     if args.ssl:
         secure = True
+    # --path overrides the path extracted from the URL (or host flag default)
+    if hasattr(args, "path") and args.path:
+        path = args.path
 
     # Wrap IPv6 literals in brackets for Host header per RFC 7230
     try:
@@ -300,8 +370,8 @@ def _resolve_config(args: argparse.Namespace) -> Config:
         path=path,
         header_host=header_host,
         concurrency=max(1, args.concurrency),
-        mode=("udp" if force_udp else args.mode),
-        backend=args.backend,
+        mode=args.mode,
+        backend=_resolve_backend(args.backend),
         base_post_length=max(1, args.post_length),
         delay_min=args.delay_min,
         delay_max=args.delay_max,
@@ -310,9 +380,9 @@ def _resolve_config(args: argparse.Namespace) -> Config:
         ssl_verify=not args.ssl_no_verify,
         max_errors=args.max_errors,
         ramp_up=args.ramp_up,
-        proxies=_build_proxies(args, secure=secure),
+        randomize_path=not args.no_random_path,
+        proxies=_build_proxies(args),
         rotate_proxies=args.rotate_proxies,
-        proxy_max_failures=args.proxy_max_failures,
         allow_public_targets=args.allow_public_targets,
         allowed_targets=allowlist,
         user_agents=load_user_agents(args.user_agents),
@@ -327,14 +397,12 @@ def _resolve_config(args: argparse.Namespace) -> Config:
         method=args.method,
         randomize_path=not args.no_random_path,
     )
-    try:
-        config.validate()
-    except ValueError as exc:
-        raise SystemExit(f"error: {exc}")
+    # Validation is enforced by Config.__post_init__; errors surface as ValueError
+    # from the constructor above and will propagate as-is to the caller.
     return config
 
 
-def _build_proxies(args: argparse.Namespace, secure: bool) -> list[Proxy] | None:
+def _build_proxies(args: argparse.Namespace) -> list[Proxy] | None:
     proxies: list[Proxy] = []
     if args.proxy:
         proxies.append(Proxy.from_url(args.proxy))
@@ -360,7 +428,16 @@ def _build_proxies(args: argparse.Namespace, secure: bool) -> list[Proxy] | None
         proxies.insert(0, Proxy("socks5", "127.0.0.1", 9050))
     if not proxies:
         env_proxy = None
-        if secure:
+        # Infer the scheme to select the right environment variable
+        _url = args.url or args.target
+        # Only derive _secure from URL scheme when --ssl was not explicitly provided
+        if args.ssl is not None:
+            _secure = args.ssl
+        elif _url and "://" in _url:
+            _secure = _url.split("://", 1)[0].lower() == "https"
+        else:
+            _secure = False
+        if _secure:
             env_proxy = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
         else:
             env_proxy = os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
@@ -386,7 +463,9 @@ def _build_custom_headers(args: argparse.Namespace) -> dict[str, str]:
     if args.header:
         for header in args.header:
             if ":" not in header:
-                print(f"  [warn] ignoring invalid header (missing ':'): {header!r}", file=sys.stderr)
+                print(
+                    f"  [warn] ignoring invalid header (missing ':'): {header!r}", file=sys.stderr
+                )
                 continue
             name, value = header.split(":", 1)
             headers[name.strip()] = value.strip()
@@ -400,7 +479,10 @@ def _build_custom_headers(args: argparse.Namespace) -> dict[str, str]:
                     if not line or line.startswith("#"):
                         continue
                     if ":" not in line:
-                        print(f"  [warn] ignoring invalid header line (missing ':'): {line!r}", file=sys.stderr)
+                        print(
+                            f"  [warn] ignoring invalid header line (missing ':'): {line!r}",
+                            file=sys.stderr,
+                        )
                         continue
                     name, value = line.split(":", 1)
                     headers[name.strip()] = value.strip()
@@ -434,44 +516,25 @@ async def _run(config: Config) -> AttackEngine:
     try:
         await engine.run()
     finally:
-        _print_summary(engine.stats, config.json_output)
-    return engine
+        _print_summary(engine.stats, json_output=config.json_output)
 
 
 def _print_summary(stats: Stats, json_output: bool = False) -> None:
+    """Print the final summary.
+
+    When ``json_output`` is set, the summary is written to stderr so it does
+    not pollute the newline-delimited JSON stream on stdout.
+    """
+    stream = sys.stderr if json_output else sys.stdout
     uptime = time.monotonic() - stats.start
-    output = sys.stderr if json_output else sys.stdout
-    print(file=output)
-    print("  connections opened :", stats.connections, file=output)
-    print("  peak concurrent    :", stats.peak_active, file=output)
-    print("  completed cycles   :", stats.completed, file=output)
-    print("  errors             :", stats.errors, file=output)
-    print("  bytes sent         :", human_size(stats.bytes_sent), file=output)
-    print("  bytes received     :", human_size(stats.bytes_received), file=output)
-    print("  elapsed            :", f"{int(uptime // 60)}:{int(uptime % 60):02d}", file=output)
-
-
-def _check_fd_limits(concurrency: int) -> None:
-    """Check file descriptor limits and warn if concurrency might exceed them."""
-    if not HAS_RESOURCE:
-        return  # Windows or systems without resource module
-
-    try:
-        soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
-        # Use 80% of soft limit as safe threshold
-        safe_limit = int(soft_limit * 0.8)
-
-        if concurrency > safe_limit:
-            print(
-                f"[warn] Requested concurrency ({concurrency}) exceeds 80% of file descriptor limit ({soft_limit}).",
-                file=sys.stderr
-            )
-            print("[warn] This may cause 'Too many open files' errors.", file=sys.stderr)
-            print(f"[warn] Consider: 'ulimit -n {hard_limit}' to increase the limit.", file=sys.stderr)
-            print(f"[warn] Or reduce concurrency with -c {safe_limit}", file=sys.stderr)
-    except (ValueError, OSError):
-        # getrlimit can fail on some systems, just skip the check
-        pass
+    print(file=stream)
+    print("  connections opened :", stats.connections, file=stream)
+    print("  peak concurrent    :", stats.peak_active, file=stream)
+    print("  completed cycles   :", stats.completed, file=stream)
+    print("  errors             :", stats.errors, file=stream)
+    print("  bytes sent         :", human_size(stats.bytes_sent), file=stream)
+    print("  bytes received     :", human_size(stats.bytes_received), file=stream)
+    print("  elapsed            :", f"{int(uptime // 60)}:{int(uptime % 60):02d}", file=stream)
 
 
 def _find_rust_binary() -> str | None:
@@ -590,15 +653,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     config = _resolve_config(args)
 
-    # Dispatch to the real Rust backend when selected.
-    if config.backend == "rust":
-        return _forward_to_rust(config, args)
-
     # Check file descriptor limits before starting
     _check_fd_limits(config.concurrency)
 
     scheme = "https" if config.secure else "http"
-    output = sys.stderr if config.json_output else sys.stdout
     print(BANNER.format(
         VER=__version__,
         TARGET=f"{scheme}://{config.host}:{config.port}{config.path}",
@@ -606,6 +664,19 @@ def main(argv: list[str] | None = None) -> int:
         MODE=config.mode,
         CONCURRENCY=config.concurrency,
     ), file=output)
+    # Route the banner to stderr in JSON mode so stdout stays a clean JSON stream.
+    banner_stream = sys.stderr if config.json_output else sys.stdout
+    print(
+        BANNER.format(
+            VER=__version__,
+            TARGET=f"{scheme}://{config.host}:{config.port}{config.path}",
+            BACKEND=config.backend,
+            MODE=config.mode,
+            CONCURRENCY=config.concurrency,
+        ),
+        file=banner_stream,
+    )
+    main
 
     try:
         engine = asyncio.run(_run(config))
@@ -619,9 +690,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # Exit with error if fail_under condition not met
-    fail_under = config.fail_under or 0  # tolerate a None value if supplied externally
-    if fail_under > 0 and engine.stats.peak_active < fail_under:
-        print(f"\nAutomation failure: peak active connections ({engine.stats.peak_active}) below threshold ({fail_under})", file=sys.stderr)
+    if (
+        config.fail_under is not None
+        and config.fail_under > 0
+        and engine.stats.peak_active < config.fail_under
+    ):
+        print(
+            f"\nAutomation failure: peak active connections ({engine.stats.peak_active}) below threshold ({config.fail_under})",
+            file=sys.stderr,
+        )
         return 1
 
     # Exit with error if fail_on_zero and no connections opened
