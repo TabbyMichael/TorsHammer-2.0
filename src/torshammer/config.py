@@ -42,8 +42,6 @@ class Config:
     user_agents: list[str] = field(default_factory=list)
     custom_headers: dict[str, str] | list[str] | None = field(default_factory=dict)
     custom_body: bytes | None = None  # Custom POST body content
-    method: str | None = None          # HTTP method override (e.g. GET, POST, PUT)
-    randomize_path: bool = True        # whether to add random query to path
     fail_under: int = 0  # Exit with error if peak active connections < N
     fail_on_zero: bool = False  # Exit with error if zero connections opened
     stats_interval: float = 1.0

@@ -6,10 +6,9 @@ import argparse
 import asyncio
 import ipaddress
 import os
-import re
-import resource
 import random
 import re
+import resource
 import shutil
 import signal
 import sys
@@ -395,7 +394,6 @@ def _resolve_config(args: argparse.Namespace) -> Config:
         quiet=args.quiet,
         verbose=args.verbose,
         method=args.method,
-        randomize_path=not args.no_random_path,
     )
     # Validation is enforced by Config.__post_init__; errors surface as ValueError
     # from the constructor above and will propagate as-is to the caller.
