@@ -13,8 +13,7 @@ use super::EngineConfig;
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const ALNUM: &[u8] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 /// Bind a fresh local datagram socket (the source port is kernel-assigned).
 pub fn open(_config: &EngineConfig) -> std::io::Result<UdpSocket> {
@@ -67,10 +66,7 @@ pub fn run(
             }
             Err(_) => break,
         }
-        super::sleep_slices(
-            running,
-            rng.range_f64(config.delay_min, config.delay_max),
-        );
+        super::sleep_slices(running, rng.range_f64(config.delay_min, config.delay_max));
     }
     !should_stop(running)
 }
@@ -142,7 +138,10 @@ mod tests {
         let completed = run(&config, &mut sock, &stats, &running, &mut rng);
 
         assert!(completed, "udp profile should complete with running=true");
-        assert!(stats.bytes_sent() >= 64, "expected datagram bytes to be counted");
+        assert!(
+            stats.bytes_sent() >= 64,
+            "expected datagram bytes to be counted"
+        );
 
         stop.store(true, Ordering::Relaxed);
         let (datagrams, bytes) = collector.join().unwrap();
