@@ -58,6 +58,16 @@ Key modules:
 
 ## Contribution Workflow
 
+### Merge Policy (enforced)
+
+- **A pull request may only be merged into `main` when its CI pipeline is
+  fully green** (pytest + coverage ≥ 85%, ruff check, ruff format, mypy,
+  compileall syntax gate; Rust changes additionally require `cargo fmt`,
+  `cargo clippy -D warnings`, and `cargo test`).
+- A red pipeline blocks the merge — it must never be ignored or bypassed.
+  If CI infrastructure itself is broken, fix or disable the pipeline
+  explicitly before merging; do not merge around it.
+
 ### 1. Choose an Issue
 
 - Check existing issues for what needs work

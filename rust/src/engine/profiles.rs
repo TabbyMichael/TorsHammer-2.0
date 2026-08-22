@@ -5,14 +5,14 @@
 //! two backends produce equivalent slow-request traffic:
 //!
 //! * `slow-post`        - headers with a big `Content-Length`, body dripped one
-//!                        byte at a time (classic Tor's Hammer).
+//!   byte at a time (classic Tor's Hammer).
 //! * `slow-post-headers` - request line and headers leaked one line at a time,
-//!                        then the body is dripped byte by byte.
+//!   then the body is dripped byte by byte.
 //! * `slow-headers`     - never finish the request headers (slowloris).
 //! * `slow-read`        - full request, then read the response in tiny chunks
-//!                        with pauses (slow-read / slow-bytes).
+//!   with pauses (slow-read / slow-bytes).
 //! * `chunked`          - `Transfer-Encoding: chunked` body dripped in small
-//!                        chunks without the terminating 0-chunk.
+//!   chunks without the terminating 0-chunk.
 
 use super::rng::Rng;
 use super::signals;
@@ -139,7 +139,10 @@ fn slow_post(
 ) -> bool {
     let length = match &config.custom_body {
         Some(body) => body.len(),
-        None => rng.range_usize((config.base_post_length / 2).max(1), config.base_post_length),
+        None => rng.range_usize(
+            (config.base_post_length / 2).max(1),
+            config.base_post_length,
+        ),
     };
     let mut headers = base_headers(config, rng);
     headers.push("Content-Type: application/x-www-form-urlencoded".to_string());
@@ -176,7 +179,10 @@ fn slow_post_headers(
     running: &AtomicBool,
     rng: &mut Rng,
 ) -> bool {
-    let length = rng.range_usize((config.base_post_length / 2).max(1), config.base_post_length);
+    let length = rng.range_usize(
+        (config.base_post_length / 2).max(1),
+        config.base_post_length,
+    );
     let mut headers = base_headers(config, rng);
     headers.push("Content-Type: application/x-www-form-urlencoded".to_string());
     headers.push(format!("Content-Length: {length}"));
@@ -289,7 +295,10 @@ fn chunked(
 ) -> bool {
     let length = match &config.custom_body {
         Some(body) => body.len(),
-        None => rng.range_usize((config.base_post_length / 2).max(1), config.base_post_length),
+        None => rng.range_usize(
+            (config.base_post_length / 2).max(1),
+            config.base_post_length,
+        ),
     };
     let mut headers = base_headers(config, rng);
     headers.push("Transfer-Encoding: chunked".to_string());
@@ -392,11 +401,11 @@ mod tests {
         let received = collector.join().unwrap();
         let text = String::from_utf8_lossy(&received);
         assert!(text.starts_with("POST /"), "missing request line: {text}");
+        assert!(text.contains("Content-Length: 8"), "missing length: {text}");
         assert!(
-            text.contains("Content-Length: 8"),
-            "missing length: {text}"
+            text.contains("X-Custom: ok"),
+            "missing custom header: {text}"
         );
-        assert!(text.contains("X-Custom: ok"), "missing custom header: {text}");
 
         let header_end = text.find("\r\n\r\n").expect("header terminator") + 4;
         assert_eq!(

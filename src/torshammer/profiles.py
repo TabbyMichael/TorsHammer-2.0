@@ -84,17 +84,42 @@ def _base_headers(config: Config, ua: str) -> list[str]:
     if random.random() < 0.4:
         headers.append(f"X-Trace-Id: {secrets.token_hex(6)}")
 
-    # Add custom headers (skip critical headers that shouldn't be overridden via CLI)
+    # Add custom headers.
     # custom_headers may be either a dict[str,str] (normal case) or a list[str]
     # (pre-formatted 'Name: Value' strings for programmatic override).
     custom = config.custom_headers
     if isinstance(custom, dict):
-        # CLI-sourced: filter out structural headers to prevent accidental corruption
-        critical_headers = {"host", "user-agent", "connection"}
+        # CLI-sourced: Host and Connection are structural and must not be
+        # overridden (they would corrupt request framing). Any other header,
+        # including User-Agent and Accept, replaces its default line so the
+        # explicit value wins without producing duplicates.
+        protected = {"host", "connection"}
+        canonical_names = {
+            "user-agent": "User-Agent",
+            "accept": "Accept",
+            "accept-language": "Accept-Language",
+            "accept-encoding": "Accept-Encoding",
+        }
+        replacements: dict[str, str] = {}
+        extras: list[str] = []
         for name, value in custom.items():
-            if name.lower() not in critical_headers:
-                headers.append(f"{name}: {value}")
-    else:
+            lower = name.lower()
+            if lower in protected:
+                continue
+            canonical = canonical_names.get(lower)
+            if canonical:
+                replacements[canonical] = value
+            else:
+                extras.append(f"{name}: {value}")
+        rebuilt: list[str] = []
+        for header in headers:
+            key = header.split(":", 1)[0]
+            if key in replacements:
+                rebuilt.append(f"{key}: {replacements.pop(key)}")
+            else:
+                rebuilt.append(header)
+        headers = rebuilt + extras
+    elif isinstance(custom, list):
         # Programmatic list: caller takes full responsibility; no filter applied.
         for header in custom:
             headers.append(header)
