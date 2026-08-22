@@ -67,8 +67,7 @@ impl Rng {
 
     /// Random alphanumeric string (ASCII letters + digits) of the given length.
     pub fn alnum(&mut self, len: usize) -> String {
-        const ALNUM: &[u8] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
         let mut out = String::with_capacity(len);
         for _ in 0..len {
             out.push(ALNUM[self.range_usize(0, ALNUM.len() - 1)] as char);

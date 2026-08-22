@@ -25,7 +25,8 @@ pub struct Stats {
     errors: AtomicU64,
     bytes_sent: AtomicU64,
     bytes_received: AtomicU64,
-    /// Clock timestamp for uptime calculations.
+    /// Clock timestamp for uptime calculations (read by future reporters).
+    #[allow(dead_code)]
     pub start: Instant,
 }
 

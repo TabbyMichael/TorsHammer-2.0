@@ -9,33 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Test coverage for SOCKS4a, HTTP CONNECT, SOCKS5 username/password auth, and
-  TLS/HTTPS connection paths (direct and through a SOCKS5 relay proxy).
-- New test fixtures: `FakeSocks4`, `FakeHttpProxy`, `FakeSocks5Auth`,
-  `RelaySocks5`, and a self-signed-certificate-backed `TlsServer`.
-- Tests for `_resolve_backend` behaviour and JSON summary routing.
+- End-to-end CLI smoke tests (`tests/test_main_e2e.py`) exercising the real
+  `main()` entry point against a live local server, including circuit-breaker,
+  `--fail-on-zero`, and UDP exit-code paths.
+- Rust↔Python backend parity smoke test (auto-skips when the Rust binary is
+  not built).
+- Unit tests for CLI helpers (target policy, allowlist, proxy building, fd
+  limits, Rust dispatch) and for SOCKS4a/SOCKS5/HTTP-CONNECT handshake error
+  branches.
+- Coverage enforcement: `pytest-cov` with an 85% floor wired into pytest and
+  both CI pipelines; syntax gate (`compileall`) in CI; Forgejo release pipeline
+  on tags; container image (`Dockerfile`, non-root).
 
 ### Fixed
 
-- `--backend rust` no longer silently runs the Python engine. It now logs a
-  warning to stderr and falls back to Python when the `torshammer-rust` binary
-  is not on PATH, keeping stdout clean (and making the flag's behaviour clear).
-- In JSON mode (`--json`), the startup banner and final summary are now written
-  to stderr so stdout remains a clean newline-delimited JSON stream that can be
-  piped directly to parsers.
-- Dribble writes in attack profiles now apply `config.connect_timeout * 2` as a
-  `writer.drain()` timeout, preventing a worker from hanging forever if a target
-  stops reading.
+- **Critical:** `src/torshammer/cli.py` no longer fails to compile (duplicate
+  `randomize_path=` keyword argument) or crash at startup (missing
+  `_check_fd_limits`, undefined banner output stream, orphaned statement).
+- `_run()` now returns the engine so circuit-breaker / fail-under /
+  fail-on-zero exit codes work again.
+- `udp://` target scheme forces UDP mode with default port 53 as documented.
+- Custom headers passed via `--header` now correctly override defaults such as
+  `User-Agent` and `Accept` without duplicating header lines.
+- Rust backend passes `cargo fmt --check` and `cargo clippy -D warnings`; CI
+  lint steps are no longer allowed to silently pass (`|| true` removed).
+- Banner is shipped as package data and loaded via `importlib.resources`, so
+  installed wheels show the correct banner.
+- `--backend rust` no longer silently runs the Python engine. It logs a warning
+  to stderr and falls back to Python when the `torshammer-rust` binary is not
+  on PATH, keeping stdout clean.
+- In JSON mode (`--json`), the startup banner and final summary are written to
+  stderr so stdout remains a clean newline-delimited JSON stream.
+- Dribble writes in attack profiles apply `config.connect_timeout * 2` as a
+  `writer.drain()` timeout, preventing a worker from hanging forever if a
+  target stops reading.
 - Removed a duplicated `## Usage` heading in README.md.
-
-
-  `pip install -e "[dev]"` without the project directory, which is not a valid
-  editable requirement and failed to install).
-- Fixed the Rust lint step targeting a non-existent `stable` toolchain in the pinned
-  `rust:1.75` image — components are now added to the default `1.75.0` toolchain so
-  `cargo fmt` and `cargo clippy` actually run.
-- Fixed `clippy::single_char_pattern` lint errors in the Rust CLI tests by using
-  `char` literals (e.g. `contains('\u{2026}')`, `starts_with('1')`).
+- Fixed the Woodpecker CI install step (invalid bare editable requirement).
+- Fixed the Rust lint step targeting a non-existent `stable` toolchain in the
+  pinned `rust:1.75` image — components are now added to the default toolchain
+  so `cargo fmt` and `cargo clippy` actually run.
+- Fixed `clippy::single_char_pattern` lint errors in the Rust CLI tests.
 
 ## [2.0.0] - 2026-08-10
 

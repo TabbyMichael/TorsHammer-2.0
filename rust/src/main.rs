@@ -86,7 +86,7 @@ impl Default for Config {
 /// The action a given invocation maps to.
 #[derive(Debug, PartialEq)]
 enum Action {
-    Run(Config),
+    Run(Box<Config>),
     Help,
     Version,
 }
@@ -99,9 +99,11 @@ where
 {
     let args: Vec<String> = iter.into_iter().map(|a| a.as_ref().to_string()).collect();
 
-    let mut cfg = Config::default();
-    cfg.color = theme::color_enabled(false);
-    cfg.unicode = theme::unicode_enabled(false);
+    let mut cfg = Config {
+        color: theme::color_enabled(false),
+        unicode: theme::unicode_enabled(false),
+        ..Config::default()
+    };
     let mut show_help = false;
     let mut show_version = false;
 
@@ -111,7 +113,9 @@ where
         match arg {
             "--target" | "-t" | "--url" | "-u" => cfg.target = take_value(&args, &mut i, arg)?,
             "--backend" => cfg.backend = take_value(&args, &mut i, arg)?,
-            "-c" | "--concurrency" => cfg.concurrency = parse_usize(take_value(&args, &mut i, arg)?, arg)?,
+            "-c" | "--concurrency" => {
+                cfg.concurrency = parse_usize(take_value(&args, &mut i, arg)?, arg)?
+            }
             "-m" | "--mode" => cfg.mode = take_value(&args, &mut i, arg)?,
             "-d" | "--duration" => cfg.duration = parse_f64(take_value(&args, &mut i, arg)?, arg)?,
             "--delay-min" => cfg.delay_min = parse_f64(take_value(&args, &mut i, arg)?, arg)?,
@@ -153,7 +157,7 @@ where
     if cfg.target.is_empty() {
         return Err("a target is required; use --target or --url".to_string());
     }
-    Ok(Action::Run(cfg))
+    Ok(Action::Run(Box::new(cfg)))
 }
 
 /// Consume the value that follows a value-taking flag.
@@ -248,7 +252,10 @@ fn run_scan(cfg: &Config) -> i32 {
     let custom_body = match &cfg.body_file {
         Some(file) => match std::fs::read(file) {
             Ok(bytes) => {
-                let _ = output.info(&format!("Loaded custom body from {file} ({} bytes)", bytes.len()));
+                let _ = output.info(&format!(
+                    "Loaded custom body from {file} ({} bytes)",
+                    bytes.len()
+                ));
                 Some(bytes)
             }
             Err(err) => {

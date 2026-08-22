@@ -6,13 +6,13 @@ import argparse
 import asyncio
 import ipaddress
 import os
-import random
 import re
 import resource
 import shutil
 import signal
 import sys
 import time
+from importlib import resources
 from urllib.parse import urlparse
 
 HAS_RESOURCE = hasattr(resource, "RLIMIT_NOFILE")
@@ -25,13 +25,10 @@ from .proxies import Proxy
 from .stats import Stats, human_size
 from .useragents import load_user_agents
 
-# Load a shared ASCII banner (assets/banner.txt) if present; fallback to a compact banner
+# Load the shared ASCII banner shipped as package data; fall back to a compact
+# banner when the resource is unavailable.
 try:
-    _banner_path = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "assets", "banner.txt")
-    )
-    with open(_banner_path, encoding="utf-8") as _f:
-        BANNER = _f.read()
+    BANNER = (resources.files("torshammer") / "banner.txt").read_text(encoding="utf-8")
 except (OSError, UnicodeDecodeError):
     BANNER = """  TorsHammer {__version__} - slow-requests DoS/Vulnerability testing tool\n\nTarget : {target}\nBackend : {backend}\nMode   : {mode}\nConns  : {concurrency}\n\n"""
 
@@ -95,9 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     attack = parser.add_argument_group("attack")
-    attack.add_argument(
-        "-m", "--mode", choices=sorted(PROFILES) + ["udp"], default="slow-post"
-    )
+    attack.add_argument("-m", "--mode", choices=sorted(PROFILES) + ["udp"], default="slow-post")
     attack.add_argument(
         "--method",
         metavar="VERB",
@@ -369,7 +364,7 @@ def _resolve_config(args: argparse.Namespace) -> Config:
         path=path,
         header_host=header_host,
         concurrency=max(1, args.concurrency),
-        mode=args.mode,
+        mode="udp" if force_udp else args.mode,
         backend=_resolve_backend(args.backend),
         base_post_length=max(1, args.post_length),
         delay_min=args.delay_min,
@@ -515,6 +510,7 @@ async def _run(config: Config) -> AttackEngine:
         await engine.run()
     finally:
         _print_summary(engine.stats, json_output=config.json_output)
+    return engine
 
 
 def _print_summary(stats: Stats, json_output: bool = False) -> None:
@@ -535,19 +531,40 @@ def _print_summary(stats: Stats, json_output: bool = False) -> None:
     print("  elapsed            :", f"{int(uptime // 60)}:{int(uptime % 60):02d}", file=stream)
 
 
+def _check_fd_limits(concurrency: int) -> None:
+    """Check file descriptor limits and warn if concurrency might exceed them."""
+    if not HAS_RESOURCE:
+        return  # Windows or systems without resource module
+
+    try:
+        soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+        # Use 80% of soft limit as safe threshold
+        safe_limit = int(soft_limit * 0.8)
+
+        if concurrency > safe_limit:
+            print(
+                f"[warn] Requested concurrency ({concurrency}) exceeds 80% of "
+                f"file descriptor limit ({soft_limit}).",
+                file=sys.stderr,
+            )
+            print("[warn] This may cause 'Too many open files' errors.", file=sys.stderr)
+            print(
+                f"[warn] Consider: 'ulimit -n {hard_limit}' to increase the limit.", file=sys.stderr
+            )
+            print(f"[warn] Or reduce concurrency with -c {safe_limit}", file=sys.stderr)
+    except (ValueError, OSError):
+        # getrlimit can fail on some systems, just skip the check
+        pass
+
+
 def _find_rust_binary() -> str | None:
     """Locate the Rust backend binary (env var, PATH, or repo-relative build)."""
     env_bin = os.environ.get("TORSHAMMER_RUST_BIN")
     if env_bin and os.path.isfile(env_bin) and os.access(env_bin, os.X_OK):
         return env_bin
-    try:
-        from shutil import which
-    except ImportError:
-        which = None
-    if which is not None:
-        found = which("torshammer-rust")
-        if found:
-            return found
+    found = shutil.which("torshammer-rust")
+    if found:
+        return found
     # Dev-install layout: <repo>/rust/target/{release,debug}/torshammer-rust
     here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     for rel in ("target/release/torshammer-rust", "target/debug/torshammer-rust"):
@@ -623,8 +640,9 @@ def _forward_to_rust(config: Config, args: argparse.Namespace) -> int:
         argv += ["--method", config.method]
     if not config.randomize_path:
         argv += ["--no-random-path"]
-    for name, value in config.custom_headers.items():
-        argv += ["--header", f"{name}: {value}"]
+    if isinstance(config.custom_headers, dict):
+        for name, value in config.custom_headers.items():
+            argv += ["--header", f"{name}: {value}"]
     if args.body_file:
         argv += ["--body-file", args.body_file]
     if config.json_output:
@@ -655,13 +673,6 @@ def main(argv: list[str] | None = None) -> int:
     _check_fd_limits(config.concurrency)
 
     scheme = "https" if config.secure else "http"
-    print(BANNER.format(
-        VER=__version__,
-        TARGET=f"{scheme}://{config.host}:{config.port}{config.path}",
-        BACKEND=config.backend,
-        MODE=config.mode,
-        CONCURRENCY=config.concurrency,
-    ), file=output)
     # Route the banner to stderr in JSON mode so stdout stays a clean JSON stream.
     banner_stream = sys.stderr if config.json_output else sys.stdout
     print(
@@ -674,7 +685,6 @@ def main(argv: list[str] | None = None) -> int:
         ),
         file=banner_stream,
     )
-    main
 
     try:
         engine = asyncio.run(_run(config))

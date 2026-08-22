@@ -15,7 +15,7 @@ pub mod url;
 
 use crate::engine::rng::Rng;
 use crate::engine::stats::{human_size, Stats};
-use std::net::{Shutdown, TcpStream, ToSocketAddrs, UdpSocket};
+use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -28,6 +28,8 @@ pub struct EngineConfig {
     pub port: u16,
     pub path: String,
     pub header_host: String,
+    /// Reserved for HTTPS/TLS support parity with the Python backend.
+    #[allow(dead_code)]
     pub secure: bool,
     pub mode: String,
     pub concurrency: usize,
@@ -242,8 +244,10 @@ fn worker(
 fn open_connection(cfg: &EngineConfig) -> std::io::Result<TcpStream> {
     let mut last_error: Option<std::io::Error> = None;
     for addr in (cfg.host.as_str(), cfg.port).to_socket_addrs()? {
-        match TcpStream::connect_timeout(&addr, Duration::from_secs_f64(cfg.connect_timeout.max(1.0)))
-        {
+        match TcpStream::connect_timeout(
+            &addr,
+            Duration::from_secs_f64(cfg.connect_timeout.max(1.0)),
+        ) {
             Ok(stream) => {
                 let _ = stream.set_nodelay(true);
                 let _ = stream.set_write_timeout(Some(Duration::from_secs_f64(
