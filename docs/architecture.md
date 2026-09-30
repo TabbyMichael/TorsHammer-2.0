@@ -11,10 +11,12 @@ flowchart TD
     CLI[CLI<br/>cli.py] --> Config[Config<br/>config.py]
     Config --> Engine[AttackEngine<br/>engine.py]
     Engine --> Profiles[Profiles<br/>profiles.py]
+    Engine --> Udp[UDP Flood<br/>udp.py]
     Engine --> ProxyPool[ProxyPool<br/>proxies.py]
     Profiles --> Connection[Connection Factory<br/>conn.py]
     ProxyPool --> Connection
     Connection --> Target[Target Server<br/>HTTP/HTTPS]
+    Udp --> UdpTarget[Target Server<br/>UDP]
     Engine --> Stats[Stats<br/>stats.py]
     Engine --> Reporter[Reporter<br/>engine.py:_report]
     
@@ -30,6 +32,7 @@ flowchart TD
     
     subgraph "Attack Profiles"
         Profiles
+        Udp
     end
     
     subgraph "Network Layer"
@@ -116,7 +119,7 @@ flowchart TD
 ### `profiles.py` - Attack Profiles
 
 **Responsibilities:**
-- Implements four attack vectors
+- Implements fourteen TCP attack vectors (fifteen including the `udp` mode in `udp.py`)
 - Randomizes request characteristics
 - Manages slow data transmission
 - Evades simple fingerprinting
@@ -127,6 +130,10 @@ flowchart TD
 - Sends POST with large Content-Length
 - Dribbles body one byte at a time
 - Keeps connection open indefinitely
+
+#### `SlowPostHeaders`
+- Sends the request line and each header line separately
+- Completes headers, then dribbles the body byte by byte
 
 #### `SlowHeaders` (Slowloris)
 - Sends GET request line
@@ -143,6 +150,45 @@ flowchart TD
 - Dribbles small chunks
 - Never sends terminating 0-chunk
 
+#### `MultipartSlowUpload`
+- Sends POST with `Content-Type: multipart/form-data` and a random boundary
+- Dribbles MIME-part content one byte at a time
+- Never emits the closing boundary; strips any programmed `Expect:` header
+
+#### `ExpectContinueAbuse`
+- Sends complete headers with `Content-Length` and `Expect: 100-continue`
+- Consumes the interim response with a read deadline, then stalls the body
+- A caller-supplied `Expect:` header replaces the default (no duplicates)
+
+#### `WebSocketSlowUpgrade`
+- Sends a WebSocket upgrade request with `Sec-WebSocket-Key`/`Version`/`Protocol`
+- Leaks each header line with delays
+- Never sends the terminating blank line, then keeps the connection alive with random headers
+
+#### `HttpPipelining`
+- Sends up to 50 complete HTTP requests per connection without reading responses
+- Holds the connection open between requests
+
+#### `RangeHeaderAbuse`
+- Sends up to 100 GET requests per connection, each with a distinct random `Range: bytes=start-end`
+- Targets file-handle and range-parsing limits
+
+#### `CookieBomb`
+- Sends a ~10 KB random `Cookie` header
+- Keeps the connection open with occasional extra data
+
+#### `JsonRpcSlow`
+- POSTs a partial JSON-RPC document (`{"jsonrpc":"2.0",...`) with an overstated `Content-Length`
+- Dribbles the payload one character at a time and never completes the JSON
+
+#### `SmtpSlowEnvelope`
+- Drips `EHLO`, `MAIL FROM` and `RCPT TO` commands slowly
+- Never sends `DATA`, leaving the mail envelope incomplete
+
+#### `FtpSlowCommand`
+- Drips `USER`, `PASS` and `PASV` commands slowly
+- Never completes a data transfer
+
 **Randomization Techniques:**
 - Random User-Agent per connection
 - Random Accept header
@@ -150,11 +196,29 @@ flowchart TD
 - Random X-Trace-Id header
 - Random query parameters
 - Random timing delays
+- Randomly generated header names (generation-based modes)
+- Random ranges and cookie payloads (targeted modes)
 
 **Security Considerations:**
 - Uses cryptographically secure random for tokens
 - Does not include exploit payloads
 - Relies on HTTP protocol compliance
+
+### `udp.py` - UDP Flood
+
+**Responsibilities:**
+- Implements the `udp` attack mode
+- Sends real UDP datagrams via `asyncio.DatagramProtocol`
+- Randomizes payload content, size and inter-datagram delay
+
+**Key Definitions:**
+- `UdpProtocol` - `asyncio.DatagramProtocol` implementation (datagram replies are discarded)
+- `open_datagram()` - Opens a datagram endpoint for the target host/port
+- `drip()` - Sends randomized 1-32 byte datagrams with delays until stopped
+
+**Security Considerations:**
+- Requires the same explicit authorization as TCP modes
+- Sends no protocol-specific exploits, only randomized datagrams
 
 ### `conn.py` - Connection Factory
 
@@ -337,8 +401,18 @@ To add a new attack profile:
 
 1. Create a new class inheriting from `Profile` in `profiles.py`
 2. Implement the `run()` method
-3. Add to `PROFILES` dictionary
-4. Update CLI choices in `cli.py`
+3. Add to the `PROFILES` dictionary (**the CLI `-m/--mode` choices are derived from this
+   dictionary**, so no `cli.py` change is needed)
+4. Mirror the profile in `rust/src/engine/profiles.rs` (`run_profile()` match arm)
+5. Add the mode to `MODES` in `rust/src/main.rs` (the Rust CLI validates against it and `--help`
+   renders it) and to the `-m` help string in `rust/src/cli/help.rs`
+6. Add tests to `tests/test_profiles.py` and the Rust `mod tests` block
+
+To add a new UDP-based mode:
+
+1. Extend `udp.py` (or add a module) with the datagram logic
+2. Route it from `engine.py` the same way `--mode udp` is routed
+3. Add the mode name to the CLI choices list in `cli.py`
 
 To add a new proxy type:
 

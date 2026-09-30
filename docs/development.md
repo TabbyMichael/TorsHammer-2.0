@@ -21,8 +21,11 @@ torshammer/
 │       ├── useragents.py        # User-Agent management
 │       ├── stats.py             # Statistics aggregation
 │       └── py.typed             # Type hints marker
+├── assets/
+│   └── banner.txt               # Shared banner artwork (Python package data + Rust include_str!)
 ├── tests/
 │   ├── conftest.py              # Shared test fixtures
+│   ├── test_banner.py           # Shared banner artwork tests
 │   ├── test_cli.py              # CLI tests
 │   ├── test_conn.py             # Connection tests
 │   ├── test_profiles.py         # Profile tests

@@ -72,6 +72,7 @@ pytest --cov=torshammer --cov-report=html
 ```
 tests/
 ├── conftest.py          # Shared fixtures
+├── test_banner.py       # Shared banner artwork tests
 ├── test_cli.py          # CLI argument parsing tests
 ├── test_conn.py         # Connection factory tests
 ├── test_profiles.py     # Attack profile tests
@@ -151,6 +152,24 @@ def test_parse_https_url():
     assert cfg.secure is True
 ```
 
+### test_banner.py
+
+**Purpose:** Guard the shared startup banner artwork.
+
+`assets/banner.txt` at the repository root is the single source of truth. The Python package ships a
+byte-identical copy as `src/torshammer/banner.txt` (package data must live inside the package) and
+the Rust engine embeds the canonical file at compile time (`rust/src/cli/banner.rs` →
+`include_str!("../../../assets/banner.txt")`). These tests fail if the copies ever drift apart, if
+the six artwork rows stop lining up, or if the placeholders the CLI substitutes are renamed.
+
+**Tests:**
+- `test_packaged_banner_matches_canonical_asset` - `src/torshammer/banner.txt` is byte-equal to `assets/banner.txt`
+- `test_rust_engine_embeds_the_canonical_asset` - the Rust banner uses `include_str!` on the shared asset
+- `test_placeholders_are_exactly_the_ones_the_cli_substitutes` - only `{VER}`, `{TARGET}`, `{BACKEND}`, `{MODE}`, `{CONCURRENCY}` appear
+- `test_artwork_is_six_uniformly_padded_rows` - the wordmark keeps six equally wide rows
+- `test_cli_banner_renders_artwork_and_run_config` - formatting produces the documented layout
+- `test_resource_fallback_banner_is_substitutable` - the missing-package-data fallback still formats
+
 ### test_conn.py
 
 **Purpose:** Test connection factory (direct and proxied connections).
@@ -176,12 +195,27 @@ async def test_direct_connect(slow_server):
 
 **Purpose:** Test attack profiles and engine integration.
 
+The `tests/test_profiles.py` suite drives every profile in the `PROFILES` registry (fourteen TCP
+profiles), checking each one sends the protocol-specific bytes it is supposed to and honours a
+pre-set stop event. The `udp` mode is covered separately by `tests/test_udp.py` (real datagrams
+against a loopback receiver).
+
 **Tests:**
-- `test_profile_sends_bytes` - All profiles send data
+- `test_profile_sends_bytes` - Parameterised across all fourteen TCP profiles: every profile sends data
+- `test_registry_exposes_the_documented_fifteen_modes` - Registry matches the documented modes
 - `test_profile_honors_pre_set_stop` - Profiles respect stop signal
 - `test_slow_read_consumes_response` - Slow-read mode
 - `test_engine_runs_and_stops_cleanly` - Engine lifecycle
 - `test_engine_stops_via_event` - Event-based stopping
+- `test_websocket_slow_upgrade_sends_websocket_headers` - WebSocket upgrade headers present
+- `test_http_pipelining_sends_multiple_requests` - Multiple pipelined requests on one connection
+- `test_range_abuse_sends_range_headers` - Randomized `Range:` headers
+- `test_cookie_bomb_sends_large_cookie` - Oversized `Cookie` header
+- `test_jsonrpc_slow_sends_json_content` - JSON-RPC payload bytes
+- `test_smtp_slow_envelope_sends_smtp_commands` - SMTP envelope commands
+- `test_ftp_slow_command_sends_ftp_commands` - FTP commands
+- `test_multipart_slow_upload_sends_multipart_preamble` - Multipart framing, no closing boundary
+- `test_expect_continue_abuse_announces_body_and_stalls` - `Expect:` announced body, stalled
 
 **Example:**
 ```python
@@ -260,8 +294,7 @@ async def test_connection_timeout(slow_server):
 ```python
 # tests/test_profiles.py
 
-
-@pytest.mark.parametrize("mode", ["slow-post", "slow-headers", "slow-read", "chunked"])
+@pytest.mark.parametrize("mode", sorted(PROFILES))
 async def test_profile_respects_config(slow_server, mode):
     """Test that profiles respect configuration parameters."""
     cfg = _cfg(slow_server, delay_min=0.5, delay_max=0.5)
@@ -269,6 +302,10 @@ async def test_profile_respects_config(slow_server, mode):
     # With 0.5s delay and 0.3s runtime, should send limited data
     assert stats.bytes_sent < 1000
 ```
+
+The real suite lists the modes explicitly (including `"slow-post-headers"` and every
+protocol-specific mode) so a newly added profile cannot silently lose coverage; keep that list in
+sync when you add a mode to `PROFILES`.
 
 ## Test Best Practices
 

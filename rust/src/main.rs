@@ -21,10 +21,27 @@ pub const DESCRIPTION: &str = "Security Testing & Vulnerability Assessment Frame
 /// The version is sourced once from Cargo.toml (`CARGO_PKG_VERSION`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Platform label like `linux-x86_64`.
-fn platform_label() -> String {
-    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
-}
+/// Attack modes implemented by the Rust engine.
+///
+/// Kept in sync with `engine::profiles::run_profile` and the Python
+/// `PROFILES` registry (`src/torshammer/profiles.py`) plus the `udp` mode.
+pub const MODES: [&str; 15] = [
+    "slow-post",
+    "slow-post-headers",
+    "slow-headers",
+    "slow-read",
+    "chunked",
+    "multipart-slow-upload",
+    "expect-continue-abuse",
+    "websocket-slow-upgrade",
+    "http-pipelining",
+    "range-abuse",
+    "cookie-bomb",
+    "jsonrpc-slow",
+    "smtp-slow-envelope",
+    "ftp-slow-command",
+    "udp",
+];
 
 /// Parsed runtime configuration for a scan invocation.
 #[derive(Debug, Clone, PartialEq)]
@@ -195,7 +212,19 @@ pub fn version_line() -> String {
 
 /// Render the banner, build the engine config, and run the attack.
 fn run_scan(cfg: &Config) -> i32 {
-    let mut output = Output::new(cfg.color, cfg.verbosity);
+    // In JSON mode stdout must stay a clean newline-delimited JSON stream, so
+    // every human-readable line (banner, status messages) is routed to stderr
+    // instead. Mirrors the Python engine's behaviour.
+    let mut output = if cfg.json {
+        Output::with_writers(
+            cfg.color,
+            cfg.verbosity,
+            Box::new(std::io::stderr()),
+            Box::new(std::io::stderr()),
+        )
+    } else {
+        Output::new(cfg.color, cfg.verbosity)
+    };
     let theme: Theme = if cfg.color {
         Theme::default()
     } else {
@@ -205,11 +234,10 @@ fn run_scan(cfg: &Config) -> i32 {
     let meta = BannerMeta {
         version: VERSION,
         description: DESCRIPTION,
-        engine: "Rust",
-        platform: &platform_label(),
         target: &cfg.target,
         backend: &cfg.backend,
-        config_path: None,
+        mode: &cfg.mode,
+        concurrency: cfg.concurrency,
     };
 
     let _ = output.raw(&banner::render(&theme, &meta, cfg.color));
@@ -232,18 +260,11 @@ fn run_scan(cfg: &Config) -> i32 {
         return 2;
     }
 
-    const MODES: [&str; 6] = [
-        "slow-post",
-        "slow-post-headers",
-        "slow-headers",
-        "slow-read",
-        "chunked",
-        "udp",
-    ];
     if !MODES.contains(&cfg.mode.as_str()) {
         let _ = output.error(&format!(
-            "unknown attack mode: {} (choose slow-post, slow-post-headers, slow-headers, slow-read, chunked, udp)",
-            cfg.mode
+            "unknown attack mode: {} (choose {})",
+            cfg.mode,
+            MODES.join(", ")
         ));
         return 2;
     }
@@ -345,6 +366,43 @@ mod tests {
     }
 
     #[test]
+    fn mode_registry_is_unique_and_complete() {
+        assert_eq!(MODES.len(), 15, "fifteen modes are documented");
+        let mut sorted = MODES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), MODES.len(), "duplicate attack mode in MODES");
+        for mode in [
+            "slow-post",
+            "slow-post-headers",
+            "slow-headers",
+            "slow-read",
+            "chunked",
+            "multipart-slow-upload",
+            "expect-continue-abuse",
+            "websocket-slow-upgrade",
+            "http-pipelining",
+            "range-abuse",
+            "cookie-bomb",
+            "jsonrpc-slow",
+            "smtp-slow-envelope",
+            "ftp-slow-command",
+            "udp",
+        ] {
+            assert!(MODES.contains(&mode), "missing mode {mode}");
+        }
+    }
+
+    #[test]
+    fn parse_args_accepts_advanced_mode() {
+        let args = ["-u", "http://example.com", "-m", "websocket-slow-upgrade"];
+        match parse_args(args).expect("should parse") {
+            Action::Run(cfg) => assert_eq!(cfg.mode, "websocket-slow-upgrade"),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_args_with_target_and_backend() {
         let args = ["--target", "http://127.0.0.1:8080", "--backend", "rust"];
         match parse_args(args).expect("should parse") {
@@ -425,12 +483,5 @@ mod tests {
         assert!(parse_args(args).is_err());
         let args = ["--bogus"];
         assert!(parse_args(args).is_err());
-    }
-
-    #[test]
-    fn platform_label_is_os_arch() {
-        let label = platform_label();
-        assert!(label.contains(std::env::consts::OS));
-        assert!(label.contains(std::env::consts::ARCH));
     }
 }

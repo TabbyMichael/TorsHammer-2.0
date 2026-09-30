@@ -117,7 +117,7 @@ torshammer --host example.com --port 80
 error: unsupported URL scheme: 'ftp'
 ```
 
-**Cause:** URL uses unsupported scheme (only http/https supported).
+**Cause:** URL uses unsupported scheme (only `http`, `https` and `udp` are supported).
 
 **Solution:**
 ```bash
@@ -126,25 +126,51 @@ torshammer -u http://example.com
 
 # Use https
 torshammer -u https://example.com
+
+# Use udp (forces --mode udp, default port 53)
+torshammer -u udp://example.com:53
 ```
 
 ### Invalid Mode
 
 **Error:**
 ```
-error: argument -m/--mode: invalid choice: 'invalid' (choose from 'slow-post', 'slow-headers', 'slow-read', 'chunked')
+error: argument -m/--mode: invalid choice: 'invalid' (choose from 'chunked', 'cookie-bomb', 'expect-continue-abuse', 'ftp-slow-command', 'http-pipelining', 'jsonrpc-slow', 'multipart-slow-upload', 'range-abuse', 'slow-headers', 'slow-post', 'slow-post-headers', 'slow-read', 'smtp-slow-envelope', 'udp', 'websocket-slow-upgrade')
 ```
 
-**Cause:** Invalid attack mode specified.
+**Cause:** Invalid attack mode specified (or a typo / missing separator in the mode name).
 
 **Solution:**
 ```bash
-# Use valid mode
+# Use a valid mode
 torshammer -u http://example.com -m slow-post
+torshammer -u http://example.com -m slow-post-headers
 torshammer -u http://example.com -m slow-headers
 torshammer -u http://example.com -m slow-read
 torshammer -u http://example.com -m chunked
+torshammer -u http://example.com -m multipart-slow-upload
+torshammer -u http://example.com -m expect-continue-abuse
+torshammer -u http://example.com -m websocket-slow-upgrade
+torshammer -u http://example.com -m http-pipelining
+torshammer -u http://example.com/large.bin -m range-abuse
+torshammer -u http://example.com -m cookie-bomb
+torshammer -u http://example.com/rpc -m jsonrpc-slow
+torshammer -u http://example.com:25 -m smtp-slow-envelope
+torshammer -u http://example.com:21 -m ftp-slow-command
+torshammer -u udp://example.com:53 -m udp
 ```
+
+Use `torshammer --help` to print the current list of accepted modes.
+
+### Unknown Mode From the Rust Backend
+
+**Error:**
+```
+unknown attack mode: <name> (choose slow-post, slow-post-headers, slow-headers, slow-read, chunked, multipart-slow-upload, expect-continue-abuse, websocket-slow-upgrade, http-pipelining, range-abuse, cookie-bomb, jsonrpc-slow, smtp-slow-envelope, ftp-slow-command, udp)
+```
+
+**Cause:** A mode was passed to the standalone `torshammer-rust` binary that the Rust engine does not
+implement, or a stale Rust binary is on `PATH` (rebuild with `cd rust && cargo build --release`).
 
 ### Proxy List Not Found
 

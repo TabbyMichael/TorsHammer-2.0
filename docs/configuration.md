@@ -63,8 +63,8 @@ config = Config(
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `concurrency` | `int` | `256` | Number of concurrent connections |
-| `mode` | `str` | `"slow-post"` | Attack mode (`slow-post`, `slow-headers`, `slow-read`, `chunked`) |
-| `base_post_length` | `int` | `4096` | Baseline Content-Length for post modes |
+| `mode` | `str` | `"slow-post"` | Attack mode: `slow-post`, `slow-post-headers`, `slow-headers`, `slow-read`, `chunked`, `multipart-slow-upload`, `expect-continue-abuse`, `websocket-slow-upgrade`, `http-pipelining`, `range-abuse`, `cookie-bomb`, `jsonrpc-slow`, `smtp-slow-envelope`, `ftp-slow-command`, `udp` |
+| `base_post_length` | `int` | `4096` | Baseline `Content-Length` for `slow-post`/`slow-post-headers`/`chunked`; byte budget for `udp` |
 | `delay_min` | `float` | `0.1` | Minimum dribble delay (seconds) |
 | `delay_max` | `float` | `3.0` | Maximum dribble delay (seconds) |
 | `duration` | `float` | `0.0` | Auto-stop after N seconds (0 = unlimited) |
@@ -82,6 +82,11 @@ config = Config(
     duration=60.0,
 )
 ```
+
+**Advanced protocol-specific modes** use the same `mode` field, e.g.
+`mode="websocket-slow-upgrade"`, `mode="range-abuse"`, `mode="jsonrpc-slow"`,
+`mode="smtp-slow-envelope"` or `mode="ftp-slow-command"`. For those modes point `port` at the service
+that speaks the protocol (25/587 for SMTP, 21 for FTP, 53 for UDP).
 
 #### Network Configuration
 
@@ -436,7 +441,10 @@ The configuration is validated during construction in the CLI:
 - **Hostname:** Required for URL-based targets
 - **Port:** Must be valid integer (1-65535)
 - **Concurrency:** Minimum 1 (enforced)
-- **Mode:** Must be one of: `slow-post`, `slow-headers`, `slow-read`, `chunked`
+- **Mode:** Must be one of:
+  `slow-post`, `slow-post-headers`, `slow-headers`, `slow-read`, `chunked`, `websocket-slow-upgrade`,
+  `http-pipelining`, `range-abuse`, `cookie-bomb`, `jsonrpc-slow`, `smtp-slow-envelope`,
+  `ftp-slow-command`, `udp`
 - **Proxy scheme:** Must be one of: `socks5`, `socks4`, `http`
 
 ## Security Considerations

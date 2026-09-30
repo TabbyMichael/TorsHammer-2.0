@@ -26,11 +26,18 @@ from .stats import Stats, human_size
 from .useragents import load_user_agents
 
 # Load the shared ASCII banner shipped as package data; fall back to a compact
-# banner when the resource is unavailable.
+# banner when the resource is unavailable. Both templates use the same
+# placeholders, so the substitution below works whichever one is in play.
 try:
     BANNER = (resources.files("torshammer") / "banner.txt").read_text(encoding="utf-8")
 except (OSError, UnicodeDecodeError):
-    BANNER = """  TorsHammer {__version__} - slow-requests DoS/Vulnerability testing tool\n\nTarget : {target}\nBackend : {backend}\nMode   : {mode}\nConns  : {concurrency}\n\n"""
+    BANNER = (
+        "  TorsHammer {VER} - slow-requests DoS/Vulnerability testing tool\n\n"
+        "Target  : {TARGET}\n"
+        "Backend : {BACKEND}\n"
+        "Mode    : {MODE}\n"
+        "Conns   : {CONCURRENCY}\n\n"
+    )
 
 
 class CustomHeadersDict(dict):
@@ -267,20 +274,24 @@ def _parse_custom_headers(raw_headers: list[str]) -> list[str]:
 def _resolve_backend(requested: str) -> str:
     """Resolve the runtime backend, warning and falling back to Python if rust is requested but unavailable.
 
-    The Rust backend is not yet implemented as an attack engine. If the user
-    explicitly selects ``--backend rust`` we check for the ``torshammer-rust``
-    binary on PATH. If it is absent (the common case today), we log a clear
-    warning to stderr and fall back to the Python reference engine so the run
-    can proceed. This avoids silently running the Python engine when the user
-    intended the Rust backend.
+    If the user explicitly selects ``--backend rust`` we look for the
+    ``torshammer-rust`` binary through :func:`_find_rust_binary` — that is, the
+    ``TORSHAMMER_RUST_BIN`` environment variable, then ``PATH``, then the
+    repo-relative ``rust/target/{release,debug}`` build produced by
+    ``cargo build``. When no binary exists we log a clear warning to stderr and
+    fall back to the Python reference engine so the run can proceed. This avoids
+    silently running the Python engine when the user intended the Rust backend,
+    and keeps the availability check consistent with the actual dispatch in
+    :func:`_forward_to_rust`.
     """
     if requested == "python":
         return "python"
-    if shutil.which("torshammer-rust") is not None:
+    if _find_rust_binary() is not None:
         return "rust"
     print(
-        "  [warn] --backend rust requested but 'torshammer-rust' binary not found"
-        " on PATH. Falling back to the python reference engine.",
+        "  [warn] --backend rust requested but no 'torshammer-rust' binary was"
+        " found (PATH, TORSHAMMER_RUST_BIN or rust/target/{release,debug})."
+        " Falling back to the python reference engine.",
         file=sys.stderr,
     )
     return "python"
