@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from torshammer.cli import _print_summary, _resolve_config, build_parser
+from torshammer.profiles import PROFILES
 from torshammer.stats import Stats
 
 
@@ -62,14 +66,28 @@ def test_backend_flag_defaults_to_python():
     assert cfg.backend == "python"
 
 
-def test_backend_flag_rust_falls_back_when_binary_missing():
-    """When --backend rust is requested but the binary is not on PATH, we
+def test_backend_flag_rust_falls_back_when_binary_missing(monkeypatch):
+    """When --backend rust is requested but no binary can be found anywhere, we
     fall back to the python engine (with a warning on stderr)."""
+    monkeypatch.setattr("torshammer.cli._find_rust_binary", lambda: None)
     args = build_parser().parse_args(
         ["--url", "http://localhost", "--backend", "rust", "--allow-public-targets"]
     )
     cfg = _resolve_config(args)
     assert cfg.backend == "python"
+
+
+def test_backend_flag_rust_keeps_rust_for_dev_build(monkeypatch):
+    """A repo-relative `rust/target/{release,debug}` build is enough to use rust."""
+    monkeypatch.setattr(
+        "torshammer.cli._find_rust_binary",
+        lambda: "/repo/rust/target/release/torshammer-rust",
+    )
+    args = build_parser().parse_args(
+        ["--url", "http://localhost", "--backend", "rust", "--allow-public-targets"]
+    )
+    cfg = _resolve_config(args)
+    assert cfg.backend == "rust"
 
 
 def test_backend_flag_rust_used_when_binary_present(monkeypatch):
@@ -180,6 +198,34 @@ def test_mode_choice_validation():
         raise AssertionError("should have failed")
     except SystemExit:
         pass
+
+
+def test_every_registered_mode_is_accepted_by_the_cli():
+    """Each profile in PROFILES (plus ``udp``) must be a valid ``-m`` choice."""
+    parser = build_parser()
+    for mode in sorted(PROFILES) + ["udp"]:
+        args = parser.parse_args(
+            ["--url", "http://x.com", "-m", mode, "--allow-public-targets"]
+        )
+        cfg = _resolve_config(args)
+        assert cfg.mode == mode
+
+
+def test_rust_cli_mode_list_matches_python_registry():
+    """The Rust CLI's ``MODES`` array must mirror the Python registry.
+
+    Both backends are documented as supporting the same fifteen modes, so the
+    Rust mode list is parsed straight out of ``rust/src/main.rs`` and compared
+    with ``sorted(PROFILES) + ["udp"]``.
+    """
+    source = (
+        Path(__file__).resolve().parents[1] / "rust" / "src" / "main.rs"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"pub const MODES: \[&str; \d+\] = \[(.*?)\];", source, re.DOTALL)
+    assert match is not None, "MODES array not found in rust/src/main.rs"
+    rust_modes = re.findall(r'"([^"]+)"', match.group(1))
+    assert len(rust_modes) == len(set(rust_modes)), "duplicate Rust mode entry"
+    assert sorted(rust_modes) == sorted(list(PROFILES) + ["udp"])
 
 
 def test_print_summary_goes_to_stderr_with_json(monkeypatch, capsys):

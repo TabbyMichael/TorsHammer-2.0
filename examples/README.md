@@ -49,13 +49,27 @@ Demonstrates the simplest use case: testing a target with default settings.
 **When to use:** First-time users getting familiar with the tool
 
 #### `all_attack_modes.sh`
-Tests a target using all four available attack modes to identify which is most effective.
+Tests a target using all available attack modes to identify which is most effective.
 
 **What it shows:**
 - slow-post mode
+- slow-post-headers mode
 - slow-headers mode
 - slow-read mode
 - chunked mode
+- multipart-slow-upload mode
+- expect-continue-abuse mode
+- websocket-slow-upgrade mode
+- http-pipelining mode
+- range-abuse mode
+- cookie-bomb mode
+- jsonrpc-slow mode
+- (opt-in, needs a matching service: smtp-slow-envelope, ftp-slow-command, udp)
+
+**Usage:**
+```bash
+./all_attack_modes.sh http://localhost:8080
+```
 
 **When to use:** Security assessment to identify vulnerable attack vectors
 

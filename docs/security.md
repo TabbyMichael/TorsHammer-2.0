@@ -34,21 +34,41 @@ Using this tool without authorization may constitute:
 
 ### Purpose
 
-Torshammer 2.0 tests web server resilience to slow-requests attacks by:
+Torshammer 2.0 tests server resilience to resource-exhaustion attacks by:
 
 - Opening long-lived HTTP/HTTPS connections
 - Sending data at very slow rates
 - Keeping connections open indefinitely
 - Exhausting server worker threads/processes
+- Sending real UDP datagrams when the `udp` mode is selected
 
 ### Attack Vectors
 
-The tool implements four slow-requests attack vectors:
+The tool implements fifteen attack vectors, in three families:
+
+**Classic TCP slow-request modes (HTTP/HTTPS):**
 
 1. **Slow POST** - Sends headers with large Content-Length, dribbles body one byte at a time
-2. **Slow Headers (Slowloris)** - Never finishes sending request headers
-3. **Slow Read** - Sends complete request, reads response in tiny chunks
-4. **Chunked** - Sends POST with chunked encoding, never sends terminating chunk
+2. **Slow POST headers** - Leaks the request line and each header, then dribbles the body
+3. **Slow Headers (Slowloris)** - Never finishes sending request headers
+4. **Slow Read** - Sends complete request, reads response in tiny chunks
+5. **Chunked** - Sends POST with chunked encoding, never sends terminating chunk
+6. **Multipart slow upload** - Dribbles MIME-part content, never emits the closing boundary
+7. **Expect-continue abuse** - Stalls the body after the interim `100 Continue` response
+
+**UDP flood mode:**
+
+8. **UDP flood** - Sends real randomized UDP datagrams to the target port
+
+**Advanced protocol-specific modes:**
+
+9. **WebSocket slow upgrade** - Never completes the WebSocket handshake
+10. **HTTP pipelining** - Pipelines many requests per connection without reading responses
+11. **Range header abuse** - Sends many randomized `Range:` requests per connection
+12. **Cookie bomb** - Sends an oversized `Cookie` header and holds the connection
+13. **JSON-RPC slow** - Dribbles a JSON-RPC payload that is never completed
+14. **SMTP slow envelope** - Drips SMTP envelope commands, never sends `DATA`
+15. **FTP slow command** - Drips FTP commands, never completes a data transfer
 
 **See:** [Attack Modes Documentation](attack-modes.md) for detailed explanations.
 

@@ -116,6 +116,7 @@ class SlowServer:
         self.active = 0
         self.respond_body: bytes | None = None
         self.server: asyncio.AbstractServer | None = None
+        self._received_data: list[bytes] = []
 
     async def _handle(self, reader, writer) -> None:
         self.connections += 1
@@ -129,6 +130,7 @@ class SlowServer:
                 if not data:
                     break
                 self.bytes_received += len(data)
+                self._received_data.append(data)
         finally:
             self.active -= 1
             writer.close()
@@ -142,6 +144,10 @@ class SlowServer:
         assert self.server is not None
         self.server.close()
         await self.server.wait_closed()
+
+    def get_received_data(self) -> bytes:
+        """Return all received data concatenated."""
+        return b"".join(self._received_data)
 
 
 class FakeSocks5:

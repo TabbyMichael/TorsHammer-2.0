@@ -10,9 +10,11 @@ individual components but never the actual command.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -151,3 +153,67 @@ def test_rust_backend_parity_smoke():
         f"rust backend exited {holder['rc']}\nstdout={holder['stdout']}\nstderr={holder['stderr']}"
     )
     assert holder["connections_seen"] > 0, "rust backend never opened a connection"
+
+
+def _built_rust_binary() -> Path | None:
+    """Locate the locally built Rust backend, if any."""
+    repo = Path(__file__).resolve().parents[1]
+    for flavour in ("release", "debug"):
+        candidate = repo / "rust" / "target" / flavour / "torshammer-rust"
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+@pytest.mark.parametrize("backend", ["python", "rust"])
+def test_json_mode_keeps_stdout_a_clean_json_stream(backend):
+    """`--json` must emit only newline-delimited JSON on stdout, for every engine.
+
+    A regression here silently breaks `torshammer ... --json | jq` and any
+    automation parsing stdout, so both engines are held to the same contract:
+    JSON on stdout, banner/status/summary on stderr.
+    """
+    binary = _built_rust_binary() if backend == "rust" else None
+    if backend == "rust" and binary is None:
+        pytest.skip("rust backend not built (cargo build --manifest-path rust/Cargo.toml)")
+    repo = Path(__file__).resolve().parents[1]
+    holder: dict = {}
+
+    async def scenario():
+        srv = SlowServer()
+        await srv.start()
+        try:
+            url = f"http://127.0.0.1:{srv.port}"
+            exe = sys.executable if backend == "python" else str(binary)
+            argv = [exe]
+            if backend == "python":
+                argv += ["-m", "torshammer"]
+            argv += ["-u", url, "-c", "2", "-d", "1", "--stats-interval", "0.3", "--json"]
+
+            def run():
+                return subprocess.run(
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                    cwd=repo,
+                )
+
+            proc = await asyncio.to_thread(run)
+            holder["stdout"] = proc.stdout
+            holder["stderr"] = proc.stderr
+        finally:
+            await srv.stop()
+
+    asyncio.run(scenario())
+
+    stdout_lines = [line for line in holder["stdout"].splitlines() if line.strip()]
+    assert stdout_lines, f"no JSON on stdout (stderr={holder['stderr']!r})"
+    for line in stdout_lines:
+        payload = json.loads(line)
+        assert "connections" in payload
+        assert "peak_active" in payload
+    assert "TorsHammer" not in holder["stdout"], "banner leaked into the JSON stream"
+    assert "thm |" not in holder["stdout"], "status line leaked into the JSON stream"
+    assert "TorsHammer" in holder["stderr"], "banner should move to stderr in JSON mode"

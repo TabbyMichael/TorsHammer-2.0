@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Seven new attack modes**, implemented in both backends with identical CLI surface
+  (`-m/--mode`), timing behaviour and test coverage:
+  - `websocket-slow-upgrade` - leaks WebSocket upgrade headers and never completes the handshake
+  - `http-pipelining` - pipelines up to 50 requests per connection without reading responses
+  - `range-abuse` - sends up to 100 randomized `Range: bytes=start-end` requests per connection
+  - `cookie-bomb` - sends a ~10 KB random `Cookie` header and holds the connection open
+  - `jsonrpc-slow` - dribbles an incomplete JSON-RPC document with an overstated `Content-Length`
+  - `smtp-slow-envelope` - drips SMTP envelope commands and never sends `DATA`
+  - `ftp-slow-command` - drips FTP commands and never completes a data transfer
+- **Two new classic TCP slow-request modes**, implemented in both backends with identical CLI
+  surface (`-m/--mode`), timing behaviour and test coverage:
+  - `multipart-slow-upload` - multipart/form-data upload with the closing boundary withheld,
+    MIME parts dribbled slowly
+  - `expect-continue-abuse` - `Expect: 100-continue` headers, body stalled after the interim response
+- Rust backend: `base64` dependency for generating `Sec-WebSocket-Key` values, and the Rust CLI now
+  accepts all fifteen modes (the `MODES` array in `rust/src/main.rs` covers every profile plus `udp`).
+- Python tests for every new mode in `tests/test_profiles.py`, plus registry/CLI coherence tests
+  (`test_registry_exposes_the_documented_fifteen_modes`,
+  `test_every_registered_mode_is_accepted_by_the_cli`,
+  `test_rust_cli_mode_list_matches_python_registry`).
+- Rust unit tests for every new profile and for the mode registry/help output
+  (`mode_registry_is_unique_and_complete`, `parse_args_accepts_advanced_mode`,
+  `help_lists_every_attack_mode`).
+- Documentation overhaul for the expanded mode set: `docs/attack-modes.md` now documents all
+  fifteen modes (mechanism, request/command structure, target systems, configuration, examples,
+  countermeasures), gains new `multipart-slow-upload` and `expect-continue-abuse` sections, a
+  per-mode comparison table and a backend support matrix. `README.md`, `HOW_TO_RUN.md`,
+  `docs/cli.md`, `docs/configuration.md`, `docs/architecture.md`, `docs/security.md`,
+  `docs/testing.md`, `docs/troubleshooting.md` and the `examples/` scripts were updated to match.
 - End-to-end CLI smoke tests (`tests/test_main_e2e.py`) exercising the real
   `main()` entry point against a live local server, including circuit-breaker,
   `--fail-on-zero`, and UDP exit-code paths.
@@ -20,6 +49,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Coverage enforcement: `pytest-cov` with an 85% floor wired into pytest and
   both CI pipelines; syntax gate (`compileall`) in CI; Forgejo release pipeline
   on tags; container image (`Dockerfile`, non-root).
+- **Shared startup banner.** `assets/banner.txt` is now the single source of
+  truth for the wordmark: the Rust engine embeds it at compile time
+  (`include_str!` in `rust/src/cli/banner.rs`) and the Python package ships the
+  same bytes as package data (`src/torshammer/banner.txt`), so both runtimes
+  print a byte-for-byte identical banner. The Rust banner was rebuilt around
+  the template (artwork, `TorsHammer {VER}`, description, then
+  `Target`/`Backend`/`Mode`/`Conns`) instead of its previous private wordmark
+  and `Engine`/`Version`/`Platform` fields.
+- `tests/test_banner.py` guards the shared artwork: byte-equality between the
+  canonical asset and the packaged copy, `include_str!` usage in the Rust
+  engine, placeholder names, uniform row padding and the rendered layout.
 
 ### Fixed
 
@@ -35,11 +75,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lint steps are no longer allowed to silently pass (`|| true` removed).
 - Banner is shipped as package data and loaded via `importlib.resources`, so
   installed wheels show the correct banner.
+- The compact fallback banner (used only when the packaged `banner.txt` cannot
+  be read) used lowercase placeholders and therefore raised `KeyError` under
+  `str.format`; it now uses the same `{VER}`/`{TARGET}`/`{BACKEND}`/`{MODE}`/
+  `{CONCURRENCY}` names as the real banner.
 - `--backend rust` no longer silently runs the Python engine. It logs a warning
   to stderr and falls back to Python when the `torshammer-rust` binary is not
   on PATH, keeping stdout clean.
+- The Rust CLI used to reject the seven protocol-specific modes
+  (`unknown attack mode: ...`) even though the Rust engine implemented them. The
+  accepted list is now the single `MODES` constant in `rust/src/main.rs`, is
+  reused by `--help`, and is covered by a Python↔Rust parity test.
 - In JSON mode (`--json`), the startup banner and final summary are written to
-  stderr so stdout remains a clean newline-delimited JSON stream.
+  stderr so stdout remains a clean newline-delimited JSON stream in both
+  backends. The Rust engine previously did the opposite (JSON on stderr, banner
+  on stdout), so `torshammer --backend rust --json | jq` saw no data.
+- `--backend rust` now finds a locally built engine. The fallback check only
+  looked at `PATH`, so the documented `cd rust && cargo build --release` flow
+  printed "binary not found on PATH" and silently ran the Python engine even
+  though `rust/target/{release,debug}/torshammer-rust` existed. Backend
+  resolution now uses the same lookup as the dispatcher (`TORSHAMMER_RUST_BIN`,
+  `PATH`, then the repo-relative build).
 - Dribble writes in attack profiles apply `config.connect_timeout * 2` as a
   `writer.drain()` timeout, preventing a worker from hanging forever if a
   target stops reading.

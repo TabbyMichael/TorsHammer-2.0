@@ -40,7 +40,7 @@ pub fn render(program: &str, version: &str, theme: &Theme, color: bool) -> Strin
         ("-c, --concurrency <N>", "Concurrent connections [default: 256]"),
         (
             "-m, --mode <NAME>",
-            "Attack profile: slow-post | slow-post-headers | slow-headers | slow-read | chunked | udp",
+            "Attack profile: slow-post | slow-post-headers | slow-headers | slow-read | chunked | multipart-slow-upload | expect-continue-abuse | websocket-slow-upgrade | http-pipelining | range-abuse | cookie-bomb | jsonrpc-slow | smtp-slow-envelope | ftp-slow-command | udp",
         ),
         ("-d, --duration <SECS>", "Attack duration in seconds (0 = unlimited)"),
         ("--delay-min <SECS>", "Minimum byte-dribble delay [default: 0.1]"),
@@ -52,7 +52,7 @@ pub fn render(program: &str, version: &str, theme: &Theme, color: bool) -> Strin
         ("--no-random-path", "Do not append a random query token"),
         ("--header <NAME:VALUE>", "Add a custom header (repeatable)"),
         ("--body-file <FILE>", "Custom POST body for slow-post/chunked modes"),
-        ("--json", "Emit JSON stats lines (to stderr)"),
+        ("--json", "Emit JSON stats lines to stdout (human output moves to stderr)"),
         ("--stats-interval <SECS>", "Stats reporting interval [default: 1.0]"),
         ("--max-errors <N>", "Circuit-breaker: exit after N consecutive errors"),
         ("--fail-under <N>", "Exit non-zero if peak active connections < N"),
@@ -117,5 +117,13 @@ mod tests {
     fn help_honors_plain_theme() {
         let out = render("TorsHammer", "2.0.0", &Theme::plain(), false);
         assert!(!out.contains("\x1b["));
+    }
+
+    #[test]
+    fn help_lists_every_attack_mode() {
+        let out = render("TorsHammer", "2.0.0", &Theme::plain(), false);
+        for mode in crate::MODES {
+            assert!(out.contains(mode), "help is missing mode {mode}");
+        }
     }
 }

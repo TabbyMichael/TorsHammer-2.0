@@ -111,6 +111,19 @@ Each line is a JSON object with the following schema:
 
 JSON output is emitted every `--stats-interval` seconds (default: 1.0 second).
 
+### Stream Contract
+
+JSON is written to **stdout**, while the banner, the live status line and the
+final summary are written to **stderr**. stdout therefore stays a clean
+newline-delimited JSON stream and can be piped or redirected directly:
+
+```bash
+torshammer -u http://example.com --json | jq -c '.peak_active'
+```
+
+Both backends follow this contract: `--backend python` and `--backend rust`
+produce the same JSON schema on the same stream.
+
 ### Example Usage
 
 #### Direct Output

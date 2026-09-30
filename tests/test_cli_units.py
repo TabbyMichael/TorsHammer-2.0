@@ -143,8 +143,20 @@ def test_resolve_backend_python_short_circuits():
 def test_resolve_backend_rust_falls_back_without_binary(monkeypatch, capsys):
     monkeypatch.delenv("TORSHAMMER_RUST_BIN", raising=False)
     monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    # The repo-relative dev build must be neutralised too: on a machine where
+    # `cargo build` has run, rust/target/{release,debug}/torshammer-rust exists.
+    monkeypatch.setattr(cli, "_find_rust_binary", lambda: None)
     assert _resolve_backend("rust") == "python"
     assert "[warn]" in capsys.readouterr().err
+
+
+def test_resolve_backend_rust_keeps_rust_when_dev_build_exists(monkeypatch, capsys):
+    """A locally built binary (repo layout) counts as available, without a warning."""
+    monkeypatch.setattr(
+        cli, "_find_rust_binary", lambda: "/repo/rust/target/release/torshammer-rust"
+    )
+    assert _resolve_backend("rust") == "rust"
+    assert capsys.readouterr().err == ""
 
 
 def _rust_config(**overrides) -> Config:

