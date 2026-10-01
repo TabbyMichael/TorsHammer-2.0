@@ -118,7 +118,13 @@ def _forward_to_rust(config: Config, args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
-    scheme = "https" if config.secure else "http"
+    # Preserve the udp scheme: Rust already parses `udp://` (url.rs) and keys
+    # the datagram engine off `-m udp`, but rewriting the target to http://
+    # would silently change meaning if dispatch ever started keying off scheme.
+    if config.mode == "udp":
+        scheme = "udp"
+    else:
+        scheme = "https" if config.secure else "http"
     argv = [
         binary,
         "--target",

@@ -358,6 +358,116 @@ def test_forward_to_rust_windows_uses_subprocess(monkeypatch: pytest.MonkeyPatch
     assert _forward_to_rust(_rust_config(), args) == 42
 
 
+def test_forward_to_rust_rejects_udp_target_without_udp_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """Defense-in-depth: a udp:// target with a non-udp Config fails closed.
+
+    The CLI itself always sets ``mode=udp`` for ``udp://`` URLs (see
+    ``tests/test_udp.py``), so this branch is only reachable for programmatic
+    callers passing a mismatched Config — which is exactly why it must not
+    exec.
+    """
+    _rust_bin(monkeypatch, tmp_path)
+
+    def fake_execv(binary: str, argv: list[str]) -> None:
+        raise AssertionError("must fail closed before exec")
+
+    monkeypatch.setattr(dispatch.os, "execv", fake_execv)
+    args = build_parser().parse_args(
+        ["-u", "udp://127.0.0.1:53", "--backend", "rust", "--allow-public-targets"]
+    )
+    assert _forward_to_rust(_rust_config(mode="slow-post"), args) == 1
+    assert "requires -m udp" in capsys.readouterr().err
+
+
+def test_forward_to_rust_udp_mode_accepted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """With `-m udp` the same udp:// target dispatches, keeping the udp scheme."""
+    captured: dict[str, list[str]] = {}
+    _rust_bin(monkeypatch, tmp_path)
+
+    def fake_execv(binary: str, argv: list[str]) -> None:
+        captured["argv"] = argv
+        raise OSError("stop here")
+
+    monkeypatch.setattr(dispatch.os, "execv", fake_execv)
+    args = build_parser().parse_args(
+        ["-u", "udp://127.0.0.1:53", "-m", "udp", "--backend", "rust", "--allow-public-targets"]
+    )
+    from torshammer.cli import _resolve_config
+
+    assert _forward_to_rust(_resolve_config(args), args) == 1
+    target = captured["argv"][captured["argv"].index("--target") + 1]
+    assert target.startswith("udp://"), target
+    assert "-m" in captured["argv"]
+    assert captured["argv"][captured["argv"].index("-m") + 1] == "udp"
+
+
+def test_forward_to_rust_warns_on_path_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """--path is dropped at the exec boundary, but must warn, not fail silently.
+
+    ``_resolve_config`` copies ``args.path`` into ``config.path``, so the CLI
+    can never trip this guard; it exists for programmatic callers whose Config
+    carries a different path than the args being forwarded.
+    """
+    _rust_bin(monkeypatch, tmp_path)
+
+    def fake_execv(binary: str, argv: list[str]) -> None:
+        raise OSError("x")
+
+    monkeypatch.setattr(dispatch.os, "execv", fake_execv)
+    args = build_parser().parse_args(
+        ["-u", "http://example.com/", "--path", "/override", "--backend", "rust"]
+    )
+    _forward_to_rust(_rust_config(path="/from-config"), args)
+    assert "ignoring --path override" in capsys.readouterr().err
+
+
+def test_forward_to_rust_forwards_optional_flags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Every mapped optional flag survives the exec boundary."""
+    captured: dict[str, list[str]] = {}
+    _rust_bin(monkeypatch, tmp_path)
+
+    def fake_execv(binary: str, argv: list[str]) -> None:
+        captured["argv"] = argv
+        raise OSError("stop here")
+
+    monkeypatch.setattr(dispatch.os, "execv", fake_execv)
+    args = build_parser().parse_args(
+        [
+            "-u",
+            "http://example.com",
+            "--backend",
+            "rust",
+            "--method",
+            "PUT",
+            "--no-random-path",
+            "--json",
+            "--quiet",
+            "-v",
+            "--fail-under",
+            "25",
+            "--fail-on-zero",
+            "--allow-public-targets",
+        ]
+    )
+    from torshammer.cli import _resolve_config
+
+    assert _forward_to_rust(_resolve_config(args), args) == 1
+    argv = captured["argv"]
+    assert argv[argv.index("--method") + 1] == "PUT"
+    assert "--no-random-path" in argv
+    assert "--json" in argv
+    assert "--quiet" in argv
+    assert "-v" in argv
+    assert argv[argv.index("--fail-under") + 1] == "25"
+    assert "--fail-on-zero" in argv
+
+
 def test_cli_import_without_resource_module(monkeypatch: pytest.MonkeyPatch):
     """Windows has no `resource` module; import + fd check must degrade."""
     import torshammer.cli as cli_mod
