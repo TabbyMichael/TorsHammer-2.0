@@ -671,6 +671,60 @@ error: cannot read proxy list: [Errno 2] No such file or directory
 ```
 **Cause:** Proxy rejected connection or authentication failed.
 
+## Safety & Layered Settings
+
+### `--dry-run`
+
+Resolve and print the target/configuration **without opening a single
+connection**. Exits `0`. The default-deny public-target policy still applies
+in dry-run mode, so a typo cannot be "safely" inspected for a public host
+without `--allow-public-targets`.
+
+```bash
+torshammer -u https://example.com/api --dry-run --allow-public-targets
+```
+
+### `--config-file` and `TORSHAMMER_*` environment variables
+
+Defaults can be layered (TOML-only, zero runtime dependencies — stdlib
+`tomllib`):
+
+```
+explicit CLI flag  >  TORSHAMMER_* env var  >  --config-file TOML  >  argparse default
+```
+
+```bash
+# torshammer.toml
+concurrency = 512
+mode = "slow-headers"
+duration = 60
+
+torshammer -u http://127.0.0.1:8080 --config-file torshammer.toml
+TORSHAMMER_DURATION=10 torshammer -u http://127.0.0.1:8080   # env wins over TOML
+```
+
+Supported keys: `concurrency`, `mode`, `delay_min`, `delay_max`, `duration`,
+`connect_timeout`, `post_length`, `stats_interval`, `max_errors`, `ramp_up`,
+`fail_under` plus boolean `ssl_no_verify`, `no_random_path`,
+`rotate_proxies`, `json_output`, `quiet`, `fail_on_zero`,
+`allow_public_targets`. A `[tool.torshammer]` table in `pyproject.toml` is
+also accepted when passed to `--config-file`.
+
+### Advisory mitigation verdict
+
+The final summary and every JSON stats line include an **advisory-only**
+`verdict` (`LIKELY_VULNERABLE` / `LIKELY_MITIGATED` / `INCONCLUSIVE`) with a
+reason. It is a heuristic signal for operators — it never influences exit
+codes. See `torshammer.stats.classify_verdict` for the exact thresholds.
+
+### `--backend rust` fail-closed behaviour
+
+When `--backend rust` is selected, flags the Rust engine cannot honor
+(`--proxy*`, `--tor`, `--proxy-env`, `--ssl-no-verify`, `--user-agents`,
+`--ramp-up`, HTTPS targets, `udp://` without `-m udp`) cause a **non-zero
+exit with an explanation** instead of a silent downgrade. Build the binary
+first (`cd rust && cargo build --release`) or set `TORSHAMMER_RUST_BIN`.
+
 ## See Also
 
 - [Architecture Documentation](architecture.md) - How the CLI connects to the engine

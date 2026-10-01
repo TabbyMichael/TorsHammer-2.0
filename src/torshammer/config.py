@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import random
 import ssl
+import tomllib
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .proxies import Proxy
 
@@ -40,7 +43,7 @@ class Config:
     allowed_targets: set[str] = field(default_factory=set)
 
     user_agents: list[str] = field(default_factory=list)
-    custom_headers: dict[str, str] | list[str] | None = field(default_factory=dict)
+    custom_headers: dict[str, str] = field(default_factory=dict)
     custom_body: bytes | None = None  # Custom POST body content
     fail_under: int = 0  # Exit with error if peak active connections < N
     fail_on_zero: bool = False  # Exit with error if zero connections opened
@@ -56,15 +59,9 @@ class Config:
 
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
-        # Normalize custom_headers: convert list of "Name: value" strings to dict
-        if isinstance(self.custom_headers, list):
-            d: dict[str, str] = {}
-            for item in self.custom_headers:
-                if ":" in item:
-                    name, value = item.split(":", 1)
-                    d[name.strip()] = value.strip()
-            self.custom_headers = d
-        elif self.custom_headers is None:
+        # Defensive runtime tolerance for legacy callers passing None
+        # (type is dict[str, str]; untyped call sites may still pass None).
+        if getattr(self, "custom_headers", None) is None:  # pyright: ignore[reportUnnecessaryComparison]
             self.custom_headers = {}
 
         # Validate timing parameters
@@ -102,7 +99,7 @@ class Config:
             raise ValueError("ramp_up must be non-negative")
 
         # Validate fail_under
-        if self.fail_under is not None and self.fail_under < 0:
+        if self.fail_under < 0:
             raise ValueError("fail_under must be non-negative")
 
     @property
@@ -128,3 +125,128 @@ class Config:
                 ctx.verify_mode = ssl.CERT_NONE
                 self._cached_ssl_context = ctx
         return self._cached_ssl_context
+
+
+# ---------------------------------------------------------------------------
+# Layered settings: CLI > TORSHAMMER_* env > torshammer.toml file > defaults.
+# TOML-only on purpose (stdlib tomllib, zero runtime dependencies).
+# ---------------------------------------------------------------------------
+
+# CLI flag name -> (TOML key, value kind); env var is TORSHAMMER_<UPPER NAME>.
+_SETTINGS_MAP: tuple[tuple[str, str], ...] = (
+    ("concurrency", "int"),
+    ("mode", "str"),
+    ("delay_min", "float"),
+    ("delay_max", "float"),
+    ("duration", "float"),
+    ("connect_timeout", "float"),
+    ("post_length", "int"),
+    ("stats_interval", "float"),
+    ("max_errors", "int"),
+    ("ramp_up", "int"),
+    ("fail_under", "int"),
+)
+
+_BOOL_FLAGS: tuple[str, ...] = (
+    "ssl_no_verify",  # inverted -> Config.ssl_verify
+    "no_random_path",
+    "rotate_proxies",
+    "json_output",
+    "quiet",
+    "fail_on_zero",
+    "allow_public_targets",
+)
+
+
+def _coerce(kind: str, raw: str) -> int | float | str:
+    if kind == "int":
+        return int(raw)
+    if kind == "float":
+        return float(raw)
+    return raw
+
+
+def load_toml_file(path: str | Path | None) -> dict[str, object]:
+    """Load a ``torshammer.toml`` file (empty dict when absent/unreadable)."""
+    if path is None:
+        for candidate in ("torshammer.toml", "pyproject.toml"):
+            if Path(candidate).is_file():
+                path = candidate
+                break
+    if path is None:
+        return {}
+    try:
+        with open(path, "rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    if str(path).endswith("pyproject.toml"):
+        tool = data.get("tool")
+        if isinstance(tool, dict):
+            section = tool.get("torshammer")
+            return section if isinstance(section, dict) else {}
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def apply_layered_settings(
+    args: object,
+    file_data: dict[str, object] | None = None,
+    defaults: dict[str, object] | None = None,
+) -> None:
+    """Fill unset CLI defaults from env, then TOML file (mutates ``args``).
+
+    Precedence: explicit CLI flag > ``TORSHAMMER_*`` env > TOML table >
+    argparse default. ``defaults`` maps flag name -> argparse default so an
+    explicitly-passed flag (value != default) is never overwritten; when
+    omitted, scalar current values are compared against the file value only
+    via env-first ordering and a CLI-sentinel cannot be derived. Callers that
+    need strict CLI-wins (``cli.main``) pass the parser defaults; tests may
+    pass ``{}`` for env/TOML-fill semantics.
+    """
+    data = file_data if file_data is not None else load_toml_file(None)
+
+    for cli_name, kind in _SETTINGS_MAP:
+        _apply_scalar(args, cli_name, kind, data, defaults)
+    for cli_name in _BOOL_FLAGS:
+        _apply_bool(args, cli_name, data)
+
+
+def _was_explicit(args: object, name: str, defaults: dict[str, object] | None) -> bool:
+    if defaults is None or name not in defaults:
+        return False
+    return getattr(args, name, None) != defaults.get(name)
+
+
+def _apply_scalar(
+    args: object,
+    name: str,
+    kind: str,
+    data: dict[str, object],
+    defaults: dict[str, object] | None = None,
+) -> None:
+    if _was_explicit(args, name, defaults):
+        return  # explicit CLI flag always wins
+    env_val = os.environ.get(f"TORSHAMMER_{name.upper()}")
+    if env_val is not None:
+        try:
+            setattr(args, name, _coerce(kind, env_val))
+            return
+        except (ValueError, TypeError):
+            pass
+    if name in data and isinstance(data[name], (int, float, str)):
+        try:
+            setattr(args, name, _coerce(kind, str(data[name])))
+        except (ValueError, TypeError):
+            pass
+
+
+def _apply_bool(args: object, name: str, data: dict[str, object]) -> None:
+    if getattr(args, name, False):
+        return  # explicit CLI flag wins
+    env_val = os.environ.get(f"TORSHAMMER_{name.upper()}")
+    if env_val is not None and env_val.strip().lower() in {"1", "true", "yes", "on"}:
+        setattr(args, name, True)
+        return
+    if data.get(name) is True:
+        setattr(args, name, True)

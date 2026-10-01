@@ -16,13 +16,20 @@ Legacy versions (1.x) are not supported.
 
 If you discover a security vulnerability in Torshammer 2.0, please report it responsibly.
 
-**Note:** This project does not currently have a designated security contact. Please use the following placeholder:
+**Preferred channel — GitHub Security Advisory:**
 
-```
-[SECURITY CONTACT]
-```
+Open a *private* vulnerability report at
+https://github.com/TabbyMichael/TorsHammer-2.0/security/advisories/new
+(Repository → *Security* → *Report a vulnerability*). This opens a private
+thread visible only to maintainers, keeps the discussion out of public issues,
+and lets GitHub assign a CVE if one is needed.
 
-**For Maintainers:** Replace `[SECURITY CONTACT]` with an actual security contact method (e.g., security@ email address, GitHub security advisory, etc.).
+If you cannot use advisories, open a **private** channel first (for example a
+direct message to the maintainer listed on https://github.com/TabbyMichael)
+and send the report there — please do not file a public issue for an
+unfixed vulnerability.
+
+Please allow **90 days** before any public disclosure.
 
 ### What to Report
 
@@ -261,13 +268,16 @@ When a vulnerability is reported and fixed:
 
 ## Contact
 
-For security questions or vulnerability reports:
+For security questions or vulnerability reports, open a private GitHub Security
+Advisory:
 
 ```
-[SECURITY CONTACT]
+https://github.com/TabbyMichael/TorsHammer-2.0/security/advisories/new
 ```
 
-**For Maintainers:** Replace with actual contact information.
+Failing that, contact the maintainer listed at https://github.com/TabbyMichael
+over a private channel. Please do not disclose an unfixed vulnerability in a
+public issue.
 
 ## See Also
 

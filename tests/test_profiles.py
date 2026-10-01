@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
+from tests.conftest import SlowServer
 from torshammer.config import Config
 from torshammer.engine import AttackEngine
-from torshammer.profiles import PROFILES, _base_headers, _path
+from torshammer.profiles import PROFILES, Profile, _base_headers, _path
 from torshammer.stats import Stats
 
 
-def _cfg(slow_server, **overrides) -> Config:
-    defaults = {
+def _cfg(slow_server: SlowServer, **overrides: Any) -> Config:
+    defaults: dict[str, Any] = {
         "host": "127.0.0.1",
         "port": slow_server.port,
         "connect_timeout": 3,
@@ -26,7 +28,12 @@ def _cfg(slow_server, **overrides) -> Config:
     return Config(**defaults)
 
 
-async def _drive(profile_cls, cfg, stop=None, run_for=0.15) -> Stats:
+async def _drive(
+    profile_cls: type[Profile],
+    cfg: Config,
+    stop: asyncio.Event | None = None,
+    run_for: float = 0.15,
+) -> Stats:
     stop = stop or asyncio.Event()
     stats = Stats()
     reader, writer = await asyncio.open_connection("127.0.0.1", cfg.port)
@@ -44,7 +51,23 @@ async def _drive(profile_cls, cfg, stop=None, run_for=0.15) -> Stats:
 
 
 @pytest.mark.parametrize(
-    "mode", ["slow-post", "slow-post-headers", "slow-headers", "slow-read", "chunked", "multipart-slow-upload", "expect-continue-abuse", "websocket-slow-upgrade", "http-pipelining", "range-abuse", "cookie-bomb", "jsonrpc-slow", "smtp-slow-envelope", "ftp-slow-command"]
+    "mode",
+    [
+        "slow-post",
+        "slow-post-headers",
+        "slow-headers",
+        "slow-read",
+        "chunked",
+        "multipart-slow-upload",
+        "expect-continue-abuse",
+        "websocket-slow-upgrade",
+        "http-pipelining",
+        "range-abuse",
+        "cookie-bomb",
+        "jsonrpc-slow",
+        "smtp-slow-envelope",
+        "ftp-slow-command",
+    ],
 )
 async def test_profile_sends_bytes(slow_server, mode):
     cfg = _cfg(slow_server)
@@ -152,7 +175,7 @@ def test_custom_headers_override_defaults():
         port=80,
         path="/",
         header_host="example.com",
-        custom_headers=["User-Agent: CustomAgent/1.0", "Accept: application/xml"],
+        custom_headers={"User-Agent": "CustomAgent/1.0", "Accept": "application/xml"},
     )
     headers = _base_headers(cfg, "IgnoredAgent")
     assert any(h == "User-Agent: CustomAgent/1.0" for h in headers)
@@ -191,7 +214,7 @@ async def test_websocket_slow_upgrade_sends_websocket_headers(slow_server):
     assert stats.bytes_sent > 0
     # Verify WebSocket headers were sent by checking received data
     received = slow_server.get_received_data()
-    received_str = received.decode('utf-8', errors='ignore')
+    received_str = received.decode("utf-8", errors="ignore")
     assert "Upgrade: websocket" in received_str
     assert "Connection: Upgrade" in received_str
     assert "Sec-WebSocket-Key:" in received_str
@@ -205,7 +228,7 @@ async def test_http_pipelining_sends_multiple_requests(slow_server):
     assert stats.bytes_sent > 0
     # Verify multiple requests were sent by checking received data
     received = slow_server.get_received_data()
-    received_str = received.decode('utf-8', errors='ignore')
+    received_str = received.decode("utf-8", errors="ignore")
     # Count how many times "GET /" appears (each request starts with this)
     request_count = received_str.count("GET /")
     assert request_count > 1, f"Expected multiple requests, got {request_count}"
@@ -218,7 +241,7 @@ async def test_range_abuse_sends_range_headers(slow_server):
     assert stats.bytes_sent > 0
     # Verify Range headers were sent by checking received data
     received = slow_server.get_received_data()
-    received_str = received.decode('utf-8', errors='ignore')
+    received_str = received.decode("utf-8", errors="ignore")
     # Count how many times "Range:" appears (each request has a Range header)
     range_count = received_str.count("Range:")
     assert range_count > 1, f"Expected multiple Range headers, got {range_count}"
@@ -233,13 +256,13 @@ async def test_cookie_bomb_sends_large_cookie(slow_server):
     assert stats.bytes_sent > 0
     # Verify large cookie was sent by checking received data
     received = slow_server.get_received_data()
-    received_str = received.decode('utf-8', errors='ignore')
+    received_str = received.decode("utf-8", errors="ignore")
     # Verify Cookie header exists and is large
     assert "Cookie:" in received_str, "Cookie header missing"
     # Find the cookie value and check it's large
     cookie_start = received_str.find("Cookie:")
     if cookie_start != -1:
-        cookie_line = received_str[cookie_start:cookie_start + 100]  # Get first 100 chars
+        cookie_line = received_str[cookie_start : cookie_start + 100]  # Get first 100 chars
         assert "bomb_cookie=" in cookie_line, "Cookie name incorrect"
 
 
@@ -250,7 +273,7 @@ async def test_jsonrpc_slow_sends_json_content(slow_server):
     assert stats.bytes_sent > 0
     # Verify JSON content type and payload were sent
     received = slow_server.get_received_data()
-    received_str = received.decode('utf-8', errors='ignore')
+    received_str = received.decode("utf-8", errors="ignore")
     assert "Content-Type: application/json" in received_str, "JSON content type missing"
     assert '"jsonrpc":"2.0"' in received_str, "JSON-RPC version missing"
     # Just check that JSON-RPC structure started (may be partial due to slow drip)
@@ -264,7 +287,7 @@ async def test_smtp_slow_envelope_sends_smtp_commands(slow_server):
     assert stats.bytes_sent > 0
     # Verify SMTP commands were sent
     received = slow_server.get_received_data()
-    received_str = received.decode('utf-8', errors='ignore')
+    received_str = received.decode("utf-8", errors="ignore")
     assert "EHLO" in received_str, "EHLO command missing"
     assert "MAIL FROM:" in received_str, "MAIL FROM command missing"
     assert "RCPT TO:" in received_str, "RCPT TO command missing"
@@ -277,7 +300,7 @@ async def test_ftp_slow_command_sends_ftp_commands(slow_server):
     assert stats.bytes_sent > 0
     # Verify FTP commands were sent
     received = slow_server.get_received_data()
-    received_str = received.decode('utf-8', errors='ignore')
+    received_str = received.decode("utf-8", errors="ignore")
     assert "USER" in received_str, "USER command missing"
     assert "PASS" in received_str, "PASS command missing"
     assert "PASV" in received_str, "PASV command missing"
@@ -289,7 +312,7 @@ async def test_multipart_slow_upload_sends_multipart_preamble(slow_server):
     stats = await _drive(PROFILES["multipart-slow-upload"], cfg, run_for=0.25)
     assert stats.bytes_sent > 0
     received = slow_server.get_received_data()
-    received_str = received.decode('utf-8', errors='ignore')
+    received_str = received.decode("utf-8", errors="ignore")
     # The drive window is long enough to overrun the Content-Length accounting,
     # so scope structural assertions to the completed request head and the
     # upload preamble that immediately follows it.
@@ -299,9 +322,7 @@ async def test_multipart_slow_upload_sends_multipart_preamble(slow_server):
     # case-insensitively so legal casing can never hide a real terminator.
     head = received_str[: header_end + 4].lower()
     assert head.startswith("post /"), "missing request line"
-    assert "content-type: multipart/form-data; boundary=" in head, (
-        "multipart content type missing"
-    )
+    assert "content-type: multipart/form-data; boundary=" in head, "multipart content type missing"
     after_head = received_str[header_end + 4 :].lower()
     assert 'content-disposition: form-data; name="upload"' in after_head, (
         "upload part preamble missing"
@@ -310,12 +331,10 @@ async def test_multipart_slow_upload_sends_multipart_preamble(slow_server):
     assert len(boundary) > len("----webkitformboundary"), (
         f"boundary token missing, got {boundary!r}"
     )
-    assert f"--{boundary}--" not in received_str.lower(), (
-        "closing boundary must never be emitted"
-    )
+    assert f"--{boundary}--" not in received_str.lower(), "closing boundary must never be emitted"
 
 
-async def test_expect_continue_abuse_announces_body_and_stalls(slow_server):
+async def test_expect_continue_abuse_announces_body_and_stalls(slow_server: SlowServer):
     """Expect-Continue Abuse should announce a body via Expect and stall it."""
     cfg = _cfg(
         slow_server,
@@ -327,13 +346,13 @@ async def test_expect_continue_abuse_announces_body_and_stalls(slow_server):
     )
     stats = await _drive(PROFILES["expect-continue-abuse"], cfg, run_for=0.25)
     assert stats.bytes_sent > 0
-    received = slow_server.get_received_data()
-    received_str = received.decode('utf-8', errors='ignore')
+    received: bytes = slow_server.get_received_data()
+    received_str: str = received.decode("utf-8", errors="ignore")
     assert "Expect: 100-continue" in received_str, "Expect header missing"
     assert "Content-Length:" in received_str, "announced body length missing"
-    header_end = received_str.find("\r\n\r\n")
+    header_end: int = received_str.find("\r\n\r\n")
     assert header_end != -1, "request headers must complete before the stall"
     # The collector is silent, so the interim read hits its short deadline
     # and the stall dribbles within the 0.25s drive window.
-    body = received_str[header_end + 4:]
+    body: str = received_str[header_end + 4 :]
     assert 1 <= len(body) <= 24, f"stalled body out of range: {len(body)} bytes"

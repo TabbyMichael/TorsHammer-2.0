@@ -272,6 +272,8 @@ def test_custom_headers_via_cli():
     )
     config = _resolve_config(args)
 
+    # Config.__post_init__ normalizes custom headers to a dict; narrow for typing.
+    assert isinstance(config.custom_headers, dict)
     assert "X-Custom" in config.custom_headers
     assert config.custom_headers["X-Custom"] == "value1"
 
@@ -327,6 +329,94 @@ def test_proxy_env_variable(monkeypatch):
     assert len(config.proxies) == 1
     assert config.proxies[0].username == "user"
     assert config.proxies[0].password == "pass"
+
+
+# ============================================================================
+# Layered settings (TOML file + TORSHAMMER_* env)
+# ============================================================================
+
+
+def test_toml_file_fills_defaults(tmp_path):
+    """A TOML file provides defaults; explicit CLI flags win (tested below)."""
+    from torshammer.cli import _resolve_config, build_parser
+    from torshammer.config import apply_layered_settings, load_toml_file
+
+    cfg_file = tmp_path / "torshammer.toml"
+    cfg_file.write_text("concurrency = 77\nmode = 'slow-headers'\n")
+    args = build_parser().parse_args(["-u", "http://example.com", "--allow-public-targets"])
+    apply_layered_settings(args, load_toml_file(cfg_file))
+    config = _resolve_config(args)
+    assert config.concurrency == 77
+    assert config.mode == "slow-headers"
+
+
+def test_cli_flag_wins_over_toml_and_env(tmp_path, monkeypatch):
+    """Precedence: CLI > env > TOML > default."""
+    from torshammer.cli import _resolve_config, build_parser
+    from torshammer.config import apply_layered_settings, load_toml_file
+
+    parser = build_parser()
+    cli_defaults = {
+        action.dest: action.default for action in parser._actions if action.dest != "help"
+    }
+    cfg_file = tmp_path / "torshammer.toml"
+    cfg_file.write_text("concurrency = 77\nduration = 9.0\n")
+    monkeypatch.setenv("TORSHAMMER_CONCURRENCY", "88")
+    args = parser.parse_args(["-u", "http://example.com", "--allow-public-targets", "-c", "99"])
+    apply_layered_settings(args, load_toml_file(cfg_file), cli_defaults)
+    config = _resolve_config(args)
+    assert config.concurrency == 99  # CLI beat env(88) and TOML(77)
+    assert config.duration == 9.0  # TOML filled the unset flag
+
+
+def test_env_fills_unset_flag(monkeypatch):
+    """TORSHAMMER_* env fills flags the CLI left at default."""
+    from torshammer.cli import _resolve_config, build_parser
+    from torshammer.config import apply_layered_settings
+
+    monkeypatch.setenv("TORSHAMMER_DURATION", "12.5")
+    args = build_parser().parse_args(["-u", "http://example.com", "--allow-public-targets"])
+    apply_layered_settings(args, {})
+    assert _resolve_config(args).duration == 12.5
+
+
+# ============================================================================
+# Dry-run + advisory verdict
+# ============================================================================
+
+
+def test_dry_run_opens_zero_connections(capsys):
+    """--dry-run resolves and prints without touching the network."""
+    from torshammer.cli import main
+
+    rc = main(["-u", "http://127.0.0.1:9", "--dry-run", "-c", "64"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "dry-run: no connections opened" in out
+    assert "127.0.0.1" in out
+
+
+def test_dry_run_rejects_public_target_by_default():
+    """Safety policy still applies in dry-run mode."""
+    import pytest
+
+    from torshammer.cli import main
+
+    with pytest.raises(SystemExit):
+        main(["-u", "http://example.com", "--dry-run"])
+
+
+def test_classify_verdict_branches():
+    """Advisory verdict covers mitigated / vulnerable / inconclusive."""
+    from torshammer.stats import Stats, classify_verdict
+
+    assert classify_verdict(Stats())[0] == "INCONCLUSIVE"
+    err = Stats(connections=10, errors=8)
+    assert classify_verdict(err)[0] == "LIKELY_MITIGATED"
+    vuln = Stats(connections=10, completed=5, peak_active=8)
+    assert classify_verdict(vuln)[0] == "LIKELY_VULNERABLE"
+    mid = Stats(connections=10, completed=1, errors=1, peak_active=3)
+    assert classify_verdict(mid)[0] == "INCONCLUSIVE"
 
 
 # ============================================================================

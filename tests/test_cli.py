@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from torshammer.cli import _print_summary, _resolve_config, build_parser
+import pytest
+
+from torshammer.cli import _print_summary, _resolve_config, build_parser, main
 from torshammer.profiles import PROFILES
 from torshammer.stats import Stats
 
@@ -40,7 +42,7 @@ def test_public_targets_allowed_explicitly():
     assert cfg.allow_public_targets is True
 
 
-def test_public_target_allowed_via_allowlist(tmp_path):
+def test_public_target_allowed_via_allowlist(tmp_path: Path):
     allowlist = tmp_path / "allowlist.txt"
     allowlist.write_text("example.com\n", encoding="utf-8")
     args = build_parser().parse_args(
@@ -66,10 +68,10 @@ def test_backend_flag_defaults_to_python():
     assert cfg.backend == "python"
 
 
-def test_backend_flag_rust_falls_back_when_binary_missing(monkeypatch):
+def test_backend_flag_rust_falls_back_when_binary_missing(monkeypatch: pytest.MonkeyPatch):
     """When --backend rust is requested but no binary can be found anywhere, we
     fall back to the python engine (with a warning on stderr)."""
-    monkeypatch.setattr("torshammer.cli._find_rust_binary", lambda: None)
+    monkeypatch.setattr("torshammer.dispatch._find_rust_binary", lambda: None)
     args = build_parser().parse_args(
         ["--url", "http://localhost", "--backend", "rust", "--allow-public-targets"]
     )
@@ -77,10 +79,10 @@ def test_backend_flag_rust_falls_back_when_binary_missing(monkeypatch):
     assert cfg.backend == "python"
 
 
-def test_backend_flag_rust_keeps_rust_for_dev_build(monkeypatch):
+def test_backend_flag_rust_keeps_rust_for_dev_build(monkeypatch: pytest.MonkeyPatch):
     """A repo-relative `rust/target/{release,debug}` build is enough to use rust."""
     monkeypatch.setattr(
-        "torshammer.cli._find_rust_binary",
+        "torshammer.dispatch._find_rust_binary",
         lambda: "/repo/rust/target/release/torshammer-rust",
     )
     args = build_parser().parse_args(
@@ -90,11 +92,13 @@ def test_backend_flag_rust_keeps_rust_for_dev_build(monkeypatch):
     assert cfg.backend == "rust"
 
 
-def test_backend_flag_rust_used_when_binary_present(monkeypatch):
+def test_backend_flag_rust_used_when_binary_present(monkeypatch: pytest.MonkeyPatch):
     """When --backend rust is requested AND the binary exists on PATH, keep rust."""
-    monkeypatch.setattr(
-        "torshammer.cli.shutil.which", lambda name: "/usr/local/bin/torshammer-rust"
-    )
+
+    def fake_which(name: str) -> str:
+        return "/usr/local/bin/torshammer-rust"
+
+    monkeypatch.setattr("torshammer.dispatch.shutil.which", fake_which)
     args = build_parser().parse_args(
         ["--url", "http://localhost", "--backend", "rust", "--allow-public-targets"]
     )
@@ -119,7 +123,7 @@ def test_tor_flag_adds_socks5_proxy():
     )
 
 
-def test_proxy_env_fallback(monkeypatch):
+def test_proxy_env_fallback(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:8080")
     args = build_parser().parse_args(["--url", "http://x.com", "--allow-public-targets"])
     cfg = _resolve_config(args)
@@ -148,6 +152,8 @@ def test_parse_custom_headers_and_method():
     cfg = _resolve_config(args)
     assert cfg.method == "PUT"
     assert cfg.path == "/custom"
+    # Config.__post_init__ normalizes custom headers to a dict; narrow for typing.
+    assert isinstance(cfg.custom_headers, dict)
     assert "X-Test" in cfg.custom_headers
     assert cfg.custom_headers["X-Test"] == "1"
     # User-Agent passed as --header is stored as a custom header (CLI dict style)
@@ -204,9 +210,7 @@ def test_every_registered_mode_is_accepted_by_the_cli():
     """Each profile in PROFILES (plus ``udp``) must be a valid ``-m`` choice."""
     parser = build_parser()
     for mode in sorted(PROFILES) + ["udp"]:
-        args = parser.parse_args(
-            ["--url", "http://x.com", "-m", mode, "--allow-public-targets"]
-        )
+        args = parser.parse_args(["--url", "http://x.com", "-m", mode, "--allow-public-targets"])
         cfg = _resolve_config(args)
         assert cfg.mode == mode
 
@@ -218,9 +222,9 @@ def test_rust_cli_mode_list_matches_python_registry():
     Rust mode list is parsed straight out of ``rust/src/main.rs`` and compared
     with ``sorted(PROFILES) + ["udp"]``.
     """
-    source = (
-        Path(__file__).resolve().parents[1] / "rust" / "src" / "main.rs"
-    ).read_text(encoding="utf-8")
+    source = (Path(__file__).resolve().parents[1] / "rust" / "src" / "main.rs").read_text(
+        encoding="utf-8"
+    )
     match = re.search(r"pub const MODES: \[&str; \d+\] = \[(.*?)\];", source, re.DOTALL)
     assert match is not None, "MODES array not found in rust/src/main.rs"
     rust_modes = re.findall(r'"([^"]+)"', match.group(1))
@@ -228,7 +232,9 @@ def test_rust_cli_mode_list_matches_python_registry():
     assert sorted(rust_modes) == sorted(list(PROFILES) + ["udp"])
 
 
-def test_print_summary_goes_to_stderr_with_json(monkeypatch, capsys):
+def test_print_summary_goes_to_stderr_with_json(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
     """With json_output=True, _print_summary must write to stderr, not stdout."""
     summary = Stats()
     _print_summary(summary, json_output=True)
@@ -237,10 +243,21 @@ def test_print_summary_goes_to_stderr_with_json(monkeypatch, capsys):
     assert "connections opened" not in captured.out
 
 
-def test_print_summary_goes_to_stdout_by_default(capsys):
+def test_print_summary_goes_to_stdout_by_default(capsys: pytest.CaptureFixture[str]):
     """By default _print_summary writes to stdout."""
     summary = Stats()
     _print_summary(summary)
     captured = capsys.readouterr()
     assert "connections opened" in captured.out
     assert "connections opened" not in captured.err
+
+
+def test_main_reports_invalid_option_without_traceback(
+    capsys: pytest.CaptureFixture[str],
+):
+    """Config validation errors surface as a clean stderr message, exit 2."""
+    rc = main(["-u", "http://127.0.0.1", "--delay-min", "-1", "-d", "0.1"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "error: invalid option" in captured.err
+    assert "Traceback" not in captured.err

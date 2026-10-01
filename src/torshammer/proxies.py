@@ -51,7 +51,7 @@ class Proxy:
         # Allow recovery after cooldown period
         return (time.monotonic() - self.last_failure) > self.recovery_time
 
-    def get_stats(self) -> dict:
+    def get_stats(self) -> dict[str, str | int | float]:
         """Get proxy statistics for JSON output."""
         return {
             "proxy": str(self),
@@ -102,7 +102,7 @@ class ProxyPool:
     def __init__(self, proxies: list[Proxy] | None, rotate: bool = False):
         self._proxies = proxies or []
         self._rotate = rotate
-        self._cycle: itertools.cycle | None = None
+        self._cycle: itertools.cycle[Proxy] | None = None
         # The set of proxies the current round-robin cycle was built from
         # (stable object-identity key), so we rebuild the cycle only when the
         # healthy pool actually changes membership.
@@ -114,7 +114,16 @@ class ProxyPool:
 
         healthy = [p for p in self._proxies if p.is_healthy()]
         # Prefer healthy proxies; fall back to all so a fully-deprioritized
-        # pool keeps retrying (rather than starving the attack).
+        # pool keeps retrying (rather than starving the attack). The fallback
+        # is noisy on purpose: operators must know every proxy is degraded.
+        if not healthy:
+            import sys
+
+            print(
+                f"  [warn] all {len(self._proxies)} proxies deprioritized; "
+                "retrying least-recently-failed",
+                file=sys.stderr,
+            )
         available = healthy if healthy else self._proxies
 
         if self._rotate:
@@ -134,9 +143,14 @@ class ProxyPool:
         """Record failed connection through proxy (deprioritize, don't remove)."""
         proxy.record_failure()
 
-    def get_all_stats(self) -> list[dict]:
+    def get_all_stats(self) -> list[dict[str, str | int | float]]:
         """Get statistics for all proxies."""
         return [p.get_stats() for p in self._proxies]
+
+    def stats_summary(self) -> dict[str, int]:
+        """Summarize pool health (healthy/total) for operators."""
+        healthy = sum(1 for p in self._proxies if p.is_healthy())
+        return {"healthy": healthy, "total": len(self._proxies)}
 
     def __len__(self) -> int:
         return len(self._proxies)

@@ -47,22 +47,43 @@ flowchart TD
 
 **Responsibilities:**
 - Argument parsing using `argparse`
-- Target URL resolution and validation
-- Configuration object construction
-- Signal handling (SIGINT, SIGTERM)
 - Orchestration of attack engine
-- Summary statistics display
+- Signal handling (SIGINT, SIGTERM)
+- Re-exports of the split helper modules (import-compatible surface)
 
 **Key Functions:**
 - `build_parser()` - Constructs argument parser with all options
-- `_resolve_config()` - Converts CLI args to Config object
-- `_run()` - Async main function that runs the attack engine
-- `_print_summary()` - Displays final statistics
+- `main()` - Process entry point (layered settings, dispatch, run, exit codes)
+- `_check_fd_limits()` - Warns when `-c` exceeds the descriptor budget
 
-**Security Considerations:**
-- Validates URL schemes (http/https only)
-- Handles proxy credentials in URLs
-- Implements graceful shutdown on signals
+### `target.py` - Target Authorization Policy
+
+- `_load_allowlist()` - Reads `--allowlist-file` (one host per line, `#` comments)
+- `_is_private_or_local_target()` - Loopback/private/link-local/reserved detection
+- `_check_target_policy()` - Default-deny public targets
+
+**Security note:** the policy is hostname-based and evaluated once at startup;
+see `docs/security.md` for the DNS-rebinding (TOCTOU) limitation.
+
+### `settings.py` - CLI-to-Config Resolution
+
+- `_resolve_config()` - Builds the validated `Config` from the parsed CLI
+- `_build_proxies()` - `--proxy`, `--proxy-env`, `--proxy-list`, `--tor`, env fallback
+- `_parse_custom_headers()` / `_build_custom_headers()` - Fail-closed header parsing
+  (`:` separator only; CR/LF rejected to prevent header injection)
+- `_load_custom_body()` - `--body-file`
+
+### `dispatch.py` - Backend Selection and Rust Dispatch
+
+- `_find_rust_binary()` - `TORSHAMMER_RUST_BIN`, `PATH`, then repo-relative build
+- `_resolve_backend()` - Warns and falls back to Python when Rust is unavailable
+- `_forward_to_rust()` - Fail-closed `execv` dispatch (POSIX) / `subprocess` (Windows)
+
+### `summary.py` - Reporting
+
+- `_print_summary()` - Final counters plus the advisory mitigation verdict
+  (stdout, or stderr in `--json` mode)
+- `_print_dry_run()` - `--dry-run` target/config preview (no sockets opened)
 
 ### `config.py` - Configuration Model
 

@@ -95,6 +95,22 @@ Torshammer 2.0 does **not**:
 
 **Recommendation:** Maintain written authorization records for all testing activities.
 
+### Target Allowlist & DNS Resolution (TOCTOU note)
+
+Public hosts are **refused by default**; targets must be private/loopback,
+confirmed with `--allow-public-targets`, or listed in `--allowlist-file`.
+
+**Known limitation — the allowlist is name-based, not IP-pinned:** the
+allowlist check happens once at startup against the hostname, while DNS
+resolution happens per connection. If the name's DNS record changes between
+start and a connection (DNS rebinding / stale TTL), traffic could reach a
+different IP than the one authorized. For strict scoping:
+
+- Target by IP literal where possible (`--host 10.0.0.5`), or
+- Revoke and re-grant authorization if the name's DNS records change, and
+- Treat `--allowlist-file` as an *authorization scoping* control, not a
+  network-level guarantee.
+
 ### Privileges
 
 **Required Privileges:** Normal user privileges

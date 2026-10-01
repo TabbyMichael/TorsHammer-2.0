@@ -7,6 +7,17 @@ import pytest
 from torshammer.proxies import Proxy, ProxyPool
 
 
+def _host(pool: ProxyPool) -> str:
+    """Host of the next pooled proxy.
+
+    ``ProxyPool.next()`` is optional because an empty pool has nothing to hand
+    out; every pool used below is non-empty.
+    """
+    proxy = pool.next()
+    assert proxy is not None, "test pool must not be empty"
+    return proxy.host
+
+
 def test_parse_socks5_with_credentials():
     proxy = Proxy.from_url("socks5://user:pa:ss@1.2.3.4:9050")
     assert proxy.scheme == "socks5"
@@ -42,10 +53,10 @@ def test_invalid_scheme_rejected():
 def test_pool_round_robin():
     proxies = [Proxy("socks5", "a", 1), Proxy("socks5", "b", 2), Proxy("socks5", "c", 3)]
     pool = ProxyPool(proxies, rotate=False)
-    assert pool.next().host == "a"
-    assert pool.next().host == "b"
-    assert pool.next().host == "c"
-    assert pool.next().host == "a"
+    assert _host(pool) == "a"
+    assert _host(pool) == "b"
+    assert _host(pool) == "c"
+    assert _host(pool) == "a"
 
 
 def test_pool_empty_returns_none():
@@ -65,7 +76,7 @@ def test_unhealthy_proxy_is_skipped_until_recovery():
 
     # Both healthy initially — pool size unchanged throughout
     assert len(pool) == 2
-    assert pool.next().host == "a"
+    assert _host(pool) == "a"
 
     # Exhaust proxy a's threshold
     pool.record_failure(a)
@@ -73,8 +84,8 @@ def test_unhealthy_proxy_is_skipped_until_recovery():
     assert not a.is_healthy()
 
     # Pool should prefer b while a is deprioritized
-    assert pool.next().host == "b"
-    assert pool.next().host == "b"
+    assert _host(pool) == "b"
+    assert _host(pool) == "b"
 
     # Pool still contains both (no removal)
     assert len(pool) == 2
@@ -85,7 +96,7 @@ def test_unhealthy_proxy_is_skipped_until_recovery():
     time.sleep(0.06)  # > recovery_time=0.05
     assert a.is_healthy()
     # Round-robin should now include a again
-    seen = {pool.next().host for _ in range(4)}
+    seen = {_host(pool) for _ in range(4)}
     assert "a" in seen
 
 
@@ -95,6 +106,24 @@ def test_round_robin_does_not_hang():
     proxies = [Proxy("socks5", str(i), i) for i in range(5)]
     pool = ProxyPool(proxies, rotate=False)
     # Call next() many times quickly; if this hangs the test suite will time out
-    results = [pool.next().host for _ in range(15)]
+    results = [_host(pool) for _ in range(15)]
     assert results[:5] == [str(i) for i in range(5)]
     assert results[5:10] == results[:5]  # second cycle
+
+
+def test_pool_falls_back_with_warning_when_all_degraded(
+    capsys: pytest.CaptureFixture[str],
+):
+    """A fully-deprioritized pool keeps retrying but warns loudly."""
+    a = Proxy("socks5", "a", 1, failure_threshold=1, recovery_time=300.0)
+    pool = ProxyPool([a], rotate=False)
+    pool.record_failure(a)
+    assert not a.is_healthy()
+    assert pool.next() is a  # fallback, never starve
+    assert "all 1 proxies deprioritized" in capsys.readouterr().err
+    assert pool.stats_summary() == {"healthy": 0, "total": 1}
+
+
+def test_pool_stats_summary_counts_healthy():
+    pool = ProxyPool([Proxy("socks5", "a", 1), Proxy("socks5", "b", 2)])
+    assert pool.stats_summary() == {"healthy": 2, "total": 2}

@@ -1,63 +1,54 @@
-"""Command line interface and orchestration."""
+"""Command line interface and orchestration.
+
+The banner, argument parser, orchestration loop and process entry point live
+here; target policy, CLI-to-Config resolution, Rust dispatch and reporting are
+implemented in :mod:`torshammer.target`, :mod:`torshammer.settings`,
+:mod:`torshammer.dispatch` and :mod:`torshammer.summary` and re-exported below
+so existing ``from torshammer.cli import ...`` imports keep working.
+"""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import ipaddress
-import os
-import re
-import resource
-import shutil
 import signal
 import sys
-import time
 from importlib import resources
-from urllib.parse import urlparse
+from typing import Final
 
-HAS_RESOURCE = hasattr(resource, "RLIMIT_NOFILE")
+try:
+    import resource
+except ImportError:  # Windows / platforms without POSIX resource module
+    resource = None  # type: ignore[assignment]
+
+HAS_RESOURCE = resource is not None and hasattr(resource, "RLIMIT_NOFILE")
 
 from . import __version__
 from .config import Config
 from .engine import AttackEngine
 from .profiles import PROFILES
-from .proxies import Proxy
-from .stats import Stats, human_size
-from .useragents import load_user_agents
-
-# Load the shared ASCII banner shipped as package data; fall back to a compact
-# banner when the resource is unavailable. Both templates use the same
-# placeholders, so the substitution below works whichever one is in play.
-try:
-    BANNER = (resources.files("torshammer") / "banner.txt").read_text(encoding="utf-8")
-except (OSError, UnicodeDecodeError):
-    BANNER = (
-        "  TorsHammer {VER} - slow-requests DoS/Vulnerability testing tool\n\n"
-        "Target  : {TARGET}\n"
-        "Backend : {BACKEND}\n"
-        "Mode    : {MODE}\n"
-        "Conns   : {CONCURRENCY}\n\n"
-    )
 
 
-class CustomHeadersDict(dict):
-    """A dict subclass where ``"Name: value" in d`` also returns True.
+def _load_banner() -> str:
+    """Load the shared ASCII banner shipped as package data.
 
-    This satisfies both the CLI-style membership check
-    ``"X-Test: 1" in cfg.custom_headers`` and the dict-indexing check
-    ``config.custom_headers["X-Custom"] == "value1"`` used across
-    different test suites.
+    Falls back to a compact banner when the packaged resource cannot be read.
+    Both templates use the same placeholders, so the substitution performed by
+    :func:`main` works whichever one is in play.
     """
+    try:
+        return (resources.files("torshammer") / "banner.txt").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return (
+            "  TorsHammer {VER} - slow-requests DoS/Vulnerability testing tool\n\n"
+            "Target  : {TARGET}\n"
+            "Backend : {BACKEND}\n"
+            "Mode    : {MODE}\n"
+            "Conns   : {CONCURRENCY}\n\n"
+        )
 
-    def __contains__(self, item: object) -> bool:
-        # Direct key lookup
-        if dict.__contains__(self, item):
-            return True
-        # Check if item matches "key: value" format for any entry
-        if isinstance(item, str) and ": " in item:
-            name, _, value = item.partition(": ")
-            return dict.__contains__(self, name) and self[name] == value
-        return False
+
+BANNER: Final[str] = _load_banner()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -81,10 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["python", "rust"],
         default="python",
         help=(
-            "Select the runtime backend (python is the reference implementation; "
-            "rust is reserved for a future high-performance backend). Selecting "
-            "rust logs a warning and falls back to python when the Rust binary "
-            "is not installed."
+            "Select the runtime backend. 'python' is the reference asyncio engine "
+            "(full flag support). 'rust' execs the high-performance backend and "
+            "only supports the mapped flags; incompatible flags "
+            "(proxies/Tor, TLS verify bypass, HTTPS targets) exit non-zero "
+            "instead of being silently ignored."
         ),
     )
     target.add_argument(
@@ -200,6 +192,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="Load custom POST body from file (for slow-post/chunked modes)",
     )
+    custom.add_argument(
+        "--config-file",
+        dest="config_file",
+        metavar="FILE",
+        help="Load defaults from a TOML file (CLI flags and TORSHAMMER_* env win)",
+    )
 
     automation = parser.add_argument_group("automation")
     automation.add_argument(
@@ -210,301 +208,52 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Exit with error if zero connections were opened",
     )
+    automation.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Resolve and print the target/config without opening any connections",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
 
-def _load_allowlist(path: str) -> set[str]:
-    allowed: set[str] = set()
-    with open(path, encoding="utf-8") as handle:
-        for line in handle:
-            entry = line.strip()
-            if not entry or entry.startswith("#"):
-                continue
-            allowed.add(entry.lower())
-    return allowed
+# ---------------------------------------------------------------------------
+# Re-exports: implementations live in target/settings/dispatch/summary; the
+# `cli` names remain import-compatible for tests and downstream users.
+# ---------------------------------------------------------------------------
+__all__ = [
+    "_build_custom_headers",
+    "_build_proxies",
+    "_check_fd_limits",
+    "_check_target_policy",
+    "_find_rust_binary",
+    "_forward_to_rust",
+    "_is_private_or_local_target",
+    "_load_allowlist",
+    "_load_custom_body",
+    "_parse_custom_headers",
+    "_print_dry_run",
+    "_print_summary",
+    "_resolve_backend",
+    "_resolve_config",
+    "build_parser",
+    "main",
+]
 
-
-def _is_private_or_local_target(host: str) -> bool:
-    host = host.strip().lower()
-    if not host or host in {"localhost"} or host.endswith(".localhost"):
-        return True
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return (
-        ip.is_loopback
-        or ip.is_private
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_multicast
-        or ip.is_unspecified
-    )
-
-
-def _check_target_policy(host: str, *, allow_public_targets: bool, allowlist: set[str]) -> None:
-    normalized = host.strip().lower()
-    if normalized in allowlist:
-        return
-    if allow_public_targets or _is_private_or_local_target(normalized):
-        return
-    raise SystemExit(
-        "error: refusing to target a public host by default. "
-        "Use --allow-public-targets or --allowlist-file to confirm explicit authorization."
-    )
-
-
-def _parse_custom_headers(raw_headers: list[str]) -> list[str]:
-    headers: list[str] = []
-    for raw in raw_headers:
-        if ":" in raw:
-            name, value = raw.split(":", 1)
-        elif "=" in raw:
-            name, value = raw.split("=", 1)
-        else:
-            raise SystemExit(f"error: invalid header format: {raw!r}")
-        name = name.strip()
-        if not name:
-            raise SystemExit(f"error: invalid header name in: {raw!r}")
-        headers.append(f"{name}: {value.strip()}")
-    return headers
-
-
-def _resolve_backend(requested: str) -> str:
-    """Resolve the runtime backend, warning and falling back to Python if rust is requested but unavailable.
-
-    If the user explicitly selects ``--backend rust`` we look for the
-    ``torshammer-rust`` binary through :func:`_find_rust_binary` — that is, the
-    ``TORSHAMMER_RUST_BIN`` environment variable, then ``PATH``, then the
-    repo-relative ``rust/target/{release,debug}`` build produced by
-    ``cargo build``. When no binary exists we log a clear warning to stderr and
-    fall back to the Python reference engine so the run can proceed. This avoids
-    silently running the Python engine when the user intended the Rust backend,
-    and keeps the availability check consistent with the actual dispatch in
-    :func:`_forward_to_rust`.
-    """
-    if requested == "python":
-        return "python"
-    if _find_rust_binary() is not None:
-        return "rust"
-    print(
-        "  [warn] --backend rust requested but no 'torshammer-rust' binary was"
-        " found (PATH, TORSHAMMER_RUST_BIN or rust/target/{release,debug})."
-        " Falling back to the python reference engine.",
-        file=sys.stderr,
-    )
-    return "python"
-
-
-def _resolve_config(args: argparse.Namespace) -> Config:
-    url = args.url or args.target
-    host: str | None = None
-    port: int | None = None
-    secure = False
-    path = "/"
-    force_udp = False
-
-    if url:
-        if "://" not in url:
-            url = "http://" + url
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https", "udp"):
-            raise SystemExit(f"error: unsupported URL scheme: {parsed.scheme!r}")
-        if not parsed.hostname:
-            raise SystemExit("error: URL has no hostname")
-        host = parsed.hostname
-        secure = parsed.scheme == "https"
-        force_udp = parsed.scheme == "udp"
-        port = parsed.port or (53 if force_udp else (443 if secure else 80))
-        path = parsed.path or "/"
-        if parsed.query:
-            path += "?" + parsed.query
-    elif args.host:
-        host = args.host
-        secure = args.ssl
-        port = args.port or (443 if secure else 80)
-
-    # Allow --path to override path from URL
-    if args.path is not None:
-        path = args.path
-
-    if host is None:
-        raise SystemExit("error: a target is required (use --url or --host)")
-
-    allowlist = set()
-    if args.allowlist_file:
-        try:
-            allowlist = _load_allowlist(args.allowlist_file)
-        except OSError as exc:
-            raise SystemExit(f"error: cannot read allowlist file: {exc}") from exc
-    _check_target_policy(
-        host,
-        allow_public_targets=args.allow_public_targets,
-        allowlist=allowlist,
-    )
-
-    if args.port and url:
-        port = args.port
-    if args.ssl:
-        secure = True
-    # --path overrides the path extracted from the URL (or host flag default)
-    if hasattr(args, "path") and args.path:
-        path = args.path
-
-    # Wrap IPv6 literals in brackets for Host header per RFC 7230
-    try:
-        addr = ipaddress.ip_address(host)
-        if addr.version == 6:
-            host_for_header = f"[{host}]"
-        else:
-            host_for_header = host
-    except ValueError:
-        host_for_header = host
-
-    if port == 80 and not secure or port == 443 and secure:
-        header_host = host_for_header
-    else:
-        header_host = f"{host_for_header}:{port}"
-
-    assert port is not None
-    config = Config(
-        host=host,
-        port=port,
-        secure=secure,
-        path=path,
-        header_host=header_host,
-        concurrency=max(1, args.concurrency),
-        mode="udp" if force_udp else args.mode,
-        backend=_resolve_backend(args.backend),
-        base_post_length=max(1, args.post_length),
-        delay_min=args.delay_min,
-        delay_max=args.delay_max,
-        duration=args.duration,
-        connect_timeout=args.connect_timeout,
-        ssl_verify=not args.ssl_no_verify,
-        max_errors=args.max_errors,
-        ramp_up=args.ramp_up,
-        randomize_path=not args.no_random_path,
-        proxies=_build_proxies(args),
-        rotate_proxies=args.rotate_proxies,
-        allow_public_targets=args.allow_public_targets,
-        allowed_targets=allowlist,
-        user_agents=load_user_agents(args.user_agents),
-        custom_headers=_build_custom_headers(args),
-        custom_body=_load_custom_body(args.body_file),
-        fail_under=args.fail_under,
-        fail_on_zero=args.fail_on_zero,
-        stats_interval=args.stats_interval,
-        json_output=args.json_output,
-        quiet=args.quiet,
-        verbose=args.verbose,
-        method=args.method,
-    )
-    # Validation is enforced by Config.__post_init__; errors surface as ValueError
-    # from the constructor above and will propagate as-is to the caller.
-    return config
-
-
-def _build_proxies(args: argparse.Namespace) -> list[Proxy] | None:
-    proxies: list[Proxy] = []
-    if args.proxy:
-        proxies.append(Proxy.from_url(args.proxy))
-    if args.proxy_env:
-        proxy_url = os.environ.get(args.proxy_env)
-        if not proxy_url:
-            raise SystemExit(f"error: environment variable {args.proxy_env!r} not set")
-        proxies.append(Proxy.from_url(proxy_url))
-    if args.proxy_list:
-        try:
-            with open(args.proxy_list, encoding="utf-8") as handle:
-                for line in handle:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    try:
-                        proxies.append(Proxy.from_url(line))
-                    except ValueError:
-                        print(f"  [warn] ignoring invalid proxy: {line!r}", file=sys.stderr)
-        except OSError as exc:
-            raise SystemExit(f"error: cannot read proxy list: {exc}")
-    if args.tor:
-        proxies.insert(0, Proxy("socks5", "127.0.0.1", 9050))
-    if not proxies:
-        env_proxy = None
-        # Infer the scheme to select the right environment variable
-        _url = args.url or args.target
-        # Only derive _secure from URL scheme when --ssl was not explicitly provided
-        if args.ssl is not None:
-            _secure = args.ssl
-        elif _url and "://" in _url:
-            _secure = _url.split("://", 1)[0].lower() == "https"
-        else:
-            _secure = False
-        if _secure:
-            env_proxy = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
-        else:
-            env_proxy = os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
-        env_proxy = env_proxy or os.getenv("ALL_PROXY") or os.getenv("all_proxy")
-        if env_proxy:
-            try:
-                proxies.append(Proxy.from_url(env_proxy))
-            except ValueError:
-                # Redact credentials before logging (security best practice)
-                redacted_url = re.sub(r"(://[^:]+:)[^@]+(@)", r"\1***\2", env_proxy)
-                print(
-                    f"  [warn] ignoring invalid proxy from environment: {redacted_url!r}",
-                    file=sys.stderr,
-                )
-    return proxies or None
-
-
-def _build_custom_headers(args: argparse.Namespace) -> dict[str, str]:
-    """Build custom headers from --header and --header-file arguments."""
-    headers: dict[str, str] = CustomHeadersDict()
-
-    # Parse --header arguments
-    if args.header:
-        for header in args.header:
-            if ":" not in header:
-                print(
-                    f"  [warn] ignoring invalid header (missing ':'): {header!r}", file=sys.stderr
-                )
-                continue
-            name, value = header.split(":", 1)
-            headers[name.strip()] = value.strip()
-
-    # Parse --header-file
-    if args.header_file:
-        try:
-            with open(args.header_file, encoding="utf-8") as handle:
-                for line in handle:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    if ":" not in line:
-                        print(
-                            f"  [warn] ignoring invalid header line (missing ':'): {line!r}",
-                            file=sys.stderr,
-                        )
-                        continue
-                    name, value = line.split(":", 1)
-                    headers[name.strip()] = value.strip()
-        except OSError as exc:
-            raise SystemExit(f"error: cannot read header file: {exc}")
-
-    return headers
-
-
-def _load_custom_body(path: str | None) -> bytes | None:
-    """Load custom POST body from file."""
-    if not path:
-        return None
-    try:
-        with open(path, "rb") as handle:
-            return handle.read()
-    except OSError as exc:
-        raise SystemExit(f"error: cannot read body file: {exc}")
+from .dispatch import _find_rust_binary, _forward_to_rust, _resolve_backend
+from .settings import (
+    _build_custom_headers,
+    _build_proxies,
+    _load_custom_body,
+    _parse_custom_headers,
+    _resolve_config,
+)
+from .summary import _print_dry_run, _print_summary
+from .target import (
+    _check_target_policy,
+    _is_private_or_local_target,
+    _load_allowlist,
+)
 
 
 async def _run(config: Config) -> AttackEngine:
@@ -524,27 +273,9 @@ async def _run(config: Config) -> AttackEngine:
     return engine
 
 
-def _print_summary(stats: Stats, json_output: bool = False) -> None:
-    """Print the final summary.
-
-    When ``json_output`` is set, the summary is written to stderr so it does
-    not pollute the newline-delimited JSON stream on stdout.
-    """
-    stream = sys.stderr if json_output else sys.stdout
-    uptime = time.monotonic() - stats.start
-    print(file=stream)
-    print("  connections opened :", stats.connections, file=stream)
-    print("  peak concurrent    :", stats.peak_active, file=stream)
-    print("  completed cycles   :", stats.completed, file=stream)
-    print("  errors             :", stats.errors, file=stream)
-    print("  bytes sent         :", human_size(stats.bytes_sent), file=stream)
-    print("  bytes received     :", human_size(stats.bytes_received), file=stream)
-    print("  elapsed            :", f"{int(uptime // 60)}:{int(uptime % 60):02d}", file=stream)
-
-
 def _check_fd_limits(concurrency: int) -> None:
     """Check file descriptor limits and warn if concurrency might exceed them."""
-    if not HAS_RESOURCE:
+    if not HAS_RESOURCE or resource is None:
         return  # Windows or systems without resource module
 
     try:
@@ -568,117 +299,43 @@ def _check_fd_limits(concurrency: int) -> None:
         pass
 
 
-def _find_rust_binary() -> str | None:
-    """Locate the Rust backend binary (env var, PATH, or repo-relative build)."""
-    env_bin = os.environ.get("TORSHAMMER_RUST_BIN")
-    if env_bin and os.path.isfile(env_bin) and os.access(env_bin, os.X_OK):
-        return env_bin
-    found = shutil.which("torshammer-rust")
-    if found:
-        return found
-    # Dev-install layout: <repo>/rust/target/{release,debug}/torshammer-rust
-    here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    for rel in ("target/release/torshammer-rust", "target/debug/torshammer-rust"):
-        candidate = os.path.join(here, "rust", rel)
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return None
-
-
-def _forward_to_rust(config: Config, args: argparse.Namespace) -> int:
-    """Replace the current process with the Rust backend (real dispatch).
-
-    The Rust engine currently supports plain HTTP with the same attack
-    profiles; HTTPS and proxying are not implemented there yet, so those
-    combinations are rejected/warned instead of being silently downgraded.
-    """
-    binary = _find_rust_binary()
-    if binary is None:
-        print(
-            "error: rust backend binary not found. Build it first with:\n"
-            "    cd rust && cargo build --release\n"
-            "or set TORSHAMMER_RUST_BIN to its path.",
-            file=sys.stderr,
-        )
-        return 127
-    if config.secure:
-        print(
-            "error: the rust backend does not support HTTPS yet. Use the python "
-            "backend (default) or point at an http target.",
-            file=sys.stderr,
-        )
-        return 1
-    if config.proxies:
-        print(
-            "[warn] rust backend does not support proxies yet; ignoring proxy configuration.",
-            file=sys.stderr,
-        )
-    if config.ramp_up > 0:
-        print("[warn] rust backend does not support --ramp-up yet; ignoring.", file=sys.stderr)
-    if config.user_agents:
-        print(
-            "[warn] rust backend uses its own built-in User-Agent list; ignoring --user-agents.",
-            file=sys.stderr,
-        )
-
-    scheme = "https" if config.secure else "http"
-    argv = [
-        binary,
-        "--target",
-        f"{scheme}://{config.host}:{config.port}{config.path}",
-        "--backend",
-        "rust",
-        "-c",
-        str(config.concurrency),
-        "-m",
-        config.mode,
-        "-d",
-        str(config.duration),
-        "--delay-min",
-        str(config.delay_min),
-        "--delay-max",
-        str(config.delay_max),
-        "--connect-timeout",
-        str(config.connect_timeout),
-        "--post-length",
-        str(config.base_post_length),
-        "--stats-interval",
-        str(config.stats_interval),
-        "--max-errors",
-        str(config.max_errors),
-    ]
-    if config.method:
-        argv += ["--method", config.method]
-    if not config.randomize_path:
-        argv += ["--no-random-path"]
-    if isinstance(config.custom_headers, dict):
-        for name, value in config.custom_headers.items():
-            argv += ["--header", f"{name}: {value}"]
-    if args.body_file:
-        argv += ["--body-file", args.body_file]
-    if config.json_output:
-        argv += ["--json"]
-    if config.quiet:
-        argv += ["--quiet"]
-    if config.verbose:
-        argv += ["-v"] * config.verbose
-    if config.fail_under:
-        argv += ["--fail-under", str(config.fail_under)]
-    if config.fail_on_zero:
-        argv += ["--fail-on-zero"]
-
-    try:
-        os.execv(binary, argv)
-    except OSError as exc:
-        print(f"error: failed to launch rust backend: {exc}", file=sys.stderr)
-        return 1
-    return 0  # unreachable: execv only returns on failure
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    config = _resolve_config(args)
+    # Layered settings (TOML-only, zero-dep): CLI > TORSHAMMER_* env >
+    # torshammer.toml / [tool.torshammer] in pyproject.toml > defaults.
+    # Controlled by --config-file; auto-discovery only when the flag is absent
+    # is intentionally OFF so runs stay reproducible by default.
+    from .config import apply_layered_settings, load_toml_file
+
+    cfg_file = getattr(args, "config_file", None)
+    cli_defaults = {
+        action.dest: action.default
+        for action in parser._actions
+        if action.dest not in {"help", "version"}
+    }
+    if cfg_file:
+        apply_layered_settings(args, load_toml_file(cfg_file), cli_defaults)
+    else:
+        apply_layered_settings(args, {}, cli_defaults)
+    try:
+        config = _resolve_config(args)
+    except ValueError as exc:
+        # Config validation errors are user errors, not crashes: report them
+        # on stderr with a clean message and exit code 2 (argparse convention).
+        print(f"error: invalid option: {exc}", file=sys.stderr)
+        return 2
+
+    if getattr(args, "dry_run", False):
+        if config.backend == "rust":
+            print("dry-run: rust backend selected; no dispatch performed", file=sys.stderr)
+        _print_dry_run(config)
+        return 0
+
+    # Dispatch to the Rust backend before any Python engine work: on POSIX this
+    # replaces the process image; on Windows it spawns and mirrors the code.
+    if config.backend == "rust":
+        return _forward_to_rust(config, args)
 
     # Check file descriptor limits before starting
     _check_fd_limits(config.concurrency)
@@ -709,11 +366,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # Exit with error if fail_under condition not met
-    if (
-        config.fail_under is not None
-        and config.fail_under > 0
-        and engine.stats.peak_active < config.fail_under
-    ):
+    if config.fail_under > 0 and engine.stats.peak_active < config.fail_under:
         print(
             f"\nAutomation failure: peak active connections ({engine.stats.peak_active}) below threshold ({config.fail_under})",
             file=sys.stderr,

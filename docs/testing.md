@@ -294,6 +294,7 @@ async def test_connection_timeout(slow_server):
 ```python
 # tests/test_profiles.py
 
+
 @pytest.mark.parametrize("mode", sorted(PROFILES))
 async def test_profile_respects_config(slow_server, mode):
     """Test that profiles respect configuration parameters."""
@@ -397,6 +398,25 @@ jobs:
 ```
 
 **Note:** Forgejo reads workflows from `.forgejo/workflows/`. A `.github/workflows/` directory (used by GitHub.com) is not used by this project.
+
+## Soak Testing (opt-in)
+
+Sustained high-concurrency behaviour is covered by an opt-in script rather
+than the merge gate:
+
+```bash
+# Local run (defaults: -c 500, 30s, slow-headers)
+python scripts/soak.py
+python scripts/soak.py --concurrency 2000 --duration 120
+SOAK_CONCURRENCY=200 SOAK_DURATION=10 python scripts/soak.py
+```
+
+It starts a local asyncio sink, runs the real CLI against it, and asserts a
+clean process exit with no socket over-subscription (`peak_active`/`active`
+must not exceed `-c`, and `connections > 0`). The script self-skips (exit 0)
+when the requested concurrency exceeds 80% of the runner's `RLIMIT_NOFILE`,
+so it is safe to schedule nightly — `.forgejo/workflows/soak.yml` does exactly
+that, plus a manual `workflow_dispatch` trigger.
 
 ## Test Coverage
 
