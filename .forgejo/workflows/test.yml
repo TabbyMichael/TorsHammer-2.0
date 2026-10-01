@@ -74,6 +74,10 @@ jobs:
       run: |
         python -m compileall src/
 
+    - name: Import smoke test (resource-free import path)
+      run: |
+        python -c "import torshammer.cli as c; print('HAS_RESOURCE=', c.HAS_RESOURCE)"
+
     - name: Run tests
       run: |
         pytest

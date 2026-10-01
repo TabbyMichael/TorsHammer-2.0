@@ -36,20 +36,20 @@ steps:
       - ruff format --check .
       - mypy src/
 
-- name: rust-lint
-  image: rust:1.75
-  commands:
-    # Install components if missing (rustfmt and clippy)
-    - rustup component add rustfmt || true
-    - rustup component add clippy || true
-    - cargo fmt --manifest-path rust/Cargo.toml -- --check
-    - cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings
+  - name: rust-lint
+    image: rust:1.75
+    commands:
+      # Install components if missing (rustfmt and clippy)
+      - rustup component add rustfmt || true
+      - rustup component add clippy || true
+      - cargo fmt --manifest-path rust/Cargo.toml -- --check
+      - cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings
 
-- name: rust-build
-  image: rust:1.75
-  commands:
-    - cargo build --manifest-path rust/Cargo.toml
-    - cargo test --manifest-path rust/Cargo.toml
+  - name: rust-build
+    image: rust:1.75
+    commands:
+      - cargo build --manifest-path rust/Cargo.toml
+      - cargo test --manifest-path rust/Cargo.toml
 
 trigger:
   event:
