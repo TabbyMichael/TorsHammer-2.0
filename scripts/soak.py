@@ -32,11 +32,15 @@ import argparse
 import asyncio
 import json
 import os
-import resource
 import subprocess
 import sys
 import threading
 from pathlib import Path
+
+try:
+    import resource
+except ImportError:  # Windows / platforms without POSIX resource module
+    resource = None  # type: ignore[assignment]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -75,6 +79,10 @@ class Sink:
 
 
 def _soft_fd_limit() -> int:
+    if resource is None:
+        # POSIX-only check; on Windows assume a budget large enough that the
+        # soak's self-skip never triggers (the tool's own fd warning still runs).
+        return 1 << 20
     soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     return int(soft) if soft != resource.RLIM_INFINITY else 1 << 20
 

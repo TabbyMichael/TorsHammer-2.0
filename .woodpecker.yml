@@ -9,7 +9,7 @@ steps:
       - python -m pip install --upgrade pip
       - pip install -e ".[dev]"
       - pytest
-      - python -m pip install ruff mypy
+      - python -m pip install ruff==0.16.2 mypy==2.3.0
       - ruff check .
       - ruff format --check .
       - mypy src/
@@ -20,7 +20,7 @@ steps:
       - python -m pip install --upgrade pip
       - pip install -e ".[dev]"
       - pytest
-      - python -m pip install ruff mypy
+      - python -m pip install ruff==0.16.2 mypy==2.3.0
       - ruff check .
       - ruff format --check .
       - mypy src/
@@ -31,7 +31,7 @@ steps:
       - python -m pip install --upgrade pip
       - pip install -e ".[dev]"
       - pytest
-      - python -m pip install ruff mypy
+      - python -m pip install ruff==0.16.2 mypy==2.3.0
       - ruff check .
       - ruff format --check .
       - mypy src/
