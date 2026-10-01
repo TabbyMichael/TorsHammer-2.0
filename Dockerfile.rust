@@ -1,0 +1,36 @@
+# Tor's Hammer 2.0 — Rust backend image (plain HTTP engine).
+#
+# The Rust engine is fail-closed on HTTPS/proxy flags; use the default Python
+# image (Dockerfile) when you need the full flag surface. Documented `-c`
+# guidance: the Rust backend uses one OS thread per connection, so prefer
+# `-c` <= a few thousand and raise `ulimit -n` accordingly.
+#
+# Build:  docker build -f Dockerfile.rust -t torshammer-rust --build-arg VERSION=2.0.0 .
+# Run:    docker run --rm torshammer-rust --help
+FROM rust:1.75-slim-bookworm AS build
+
+WORKDIR /build
+COPY rust/ ./rust/
+RUN cargo build --release --manifest-path rust/Cargo.toml
+
+FROM debian:bookworm-slim
+
+ARG VERSION=2.0.0
+ARG REVISION=unknown
+
+LABEL org.opencontainers.image.title="torshammer-rust"
+LABEL org.opencontainers.image.description="Rust backend for Tor's Hammer 2.0 (authorized use only)"
+LABEL org.opencontainers.image.licenses="GPL-2.0-or-later"
+LABEL org.opencontainers.image.version=$VERSION
+LABEL org.opencontainers.image.revision=$REVISION
+LABEL org.opencontainers.image.source="https://github.com/TabbyMichael/TorsHammer-2.0"
+
+COPY --from=build /build/rust/target/release/torshammer-rust /usr/local/bin/torshammer-rust
+
+# Non-root user: the tool must never run privileged by default.
+RUN useradd --create-home --shell /usr/sbin/nologin tester
+USER tester
+WORKDIR /home/tester
+
+ENTRYPOINT ["torshammer-rust"]
+CMD ["--help"]
