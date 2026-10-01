@@ -521,12 +521,18 @@ fn multipart_slow_upload(
         return false;
     }
     let mut part = 0usize;
+    // Countdown to the next non-final boundary instead of `part % 64 == 0`:
+    // equivalent behaviour (fires at 64, 128, ...) while staying clean under
+    // both the pinned clippy (rust 1.75) and modern `manual_is_multiple_of`.
+    let mut since_boundary: usize = 64;
     while !should_stop(running) {
         if write_full(stream, &[dribble(rng)], stats).is_err() {
             break;
         }
         part += 1;
-        if part % 64 == 0 {
+        since_boundary -= 1;
+        if since_boundary == 0 {
+            since_boundary = 64;
             // Emit a fresh non-final boundary every so often: it keeps
             // multipart parsers scanning and buffering without ever
             // signalling the end of the upload.
