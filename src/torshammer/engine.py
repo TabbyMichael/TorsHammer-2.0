@@ -222,7 +222,7 @@ class AttackEngine:
                 last_time, last_sent, last_recv = now, stats.bytes_sent, stats.bytes_received
                 uptime = now - stats.start
 
-                payload = {
+                payload: dict[str, object] = {
                     "connections": stats.connections,
                     "active": stats.active,
                     "peak_active": stats.peak_active,
@@ -234,6 +234,13 @@ class AttackEngine:
                     "recv_bytes_per_sec": round(recv_rate, 1),
                     "uptime": round(uptime, 1),
                 }
+                # Advisory-only verdict: informational signal for operators,
+                # never drives exit codes (see classify_verdict limits).
+                from .stats import classify_verdict as _classify
+
+                verdict, reason = _classify(stats)
+                payload["verdict"] = verdict
+                payload["verdict_reason"] = reason
 
                 if config.json_output:
                     print(json.dumps(payload), flush=True)

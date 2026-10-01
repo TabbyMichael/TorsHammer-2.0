@@ -63,3 +63,28 @@ warn_unused_ignores = true
 warn_no_return = true
 strict_optional = true
 exclude = ["legacy"]
+
+# Pylance/Pyright policy for this repository.
+#
+# The committed quality gate is `ruff check` + `ruff format --check` + `mypy src/`
+# (see .woodpecker.yml). Pyright's `strict` mode additionally enables the
+# "partially unknown" family of rules, which fires pervasively on
+# `argparse.Namespace` attributes and on untyped pytest fixtures without
+# describing real defects. The policy below keeps `standard` as the baseline and
+# re-enables the strict rules that have actually caught bugs here.
+#
+# Note: when a `[tool.pyright]` section exists, Pylance ignores pyright settings
+# from VS Code's settings.json, so this file is the single source of truth.
+[tool.pyright]
+include = ["src", "tests"]
+typeCheckingMode = "standard"
+extraPaths = ["src"]
+# Strict-only rules worth keeping on (all four found real issues).
+reportMissingTypeArgument = "error"
+reportConstantRedefinition = "error"
+reportUnnecessaryComparison = "error"
+reportUnusedFunction = "warning"
+
+# Tests legitimately exercise module-private CLI helpers (`_resolve_config`,
+# `_check_target_policy`, ...). That only reports under `strict`, so no
+# per-directory override is needed while the baseline stays `standard`.

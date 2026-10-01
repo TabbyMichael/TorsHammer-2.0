@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -33,7 +34,7 @@ def _free_port() -> int:
 
 def test_main_end_to_end_against_local_server():
     """main() must complete successfully against a live local target."""
-    holder: dict = {}
+    holder: dict[str, Any] = {}
     started = threading.Event()
 
     async def scenario():
@@ -124,7 +125,7 @@ def test_rust_backend_parity_smoke():
     if binary is None:
         pytest.skip("rust backend not built (cargo build --manifest-path rust/Cargo.toml)")
 
-    holder: dict = {}
+    holder: dict[str, Any] = {}
 
     async def scenario():
         srv = SlowServer()
@@ -166,7 +167,7 @@ def _built_rust_binary() -> Path | None:
 
 
 @pytest.mark.parametrize("backend", ["python", "rust"])
-def test_json_mode_keeps_stdout_a_clean_json_stream(backend):
+def test_json_mode_keeps_stdout_a_clean_json_stream(backend: str):
     """`--json` must emit only newline-delimited JSON on stdout, for every engine.
 
     A regression here silently breaks `torshammer ... --json | jq` and any
@@ -177,7 +178,7 @@ def test_json_mode_keeps_stdout_a_clean_json_stream(backend):
     if backend == "rust" and binary is None:
         pytest.skip("rust backend not built (cargo build --manifest-path rust/Cargo.toml)")
     repo = Path(__file__).resolve().parents[1]
-    holder: dict = {}
+    holder: dict[str, Any] = {}
 
     async def scenario():
         srv = SlowServer()
@@ -208,10 +209,10 @@ def test_json_mode_keeps_stdout_a_clean_json_stream(backend):
 
     asyncio.run(scenario())
 
-    stdout_lines = [line for line in holder["stdout"].splitlines() if line.strip()]
+    stdout_lines: list[str] = [line for line in holder["stdout"].splitlines() if line.strip()]
     assert stdout_lines, f"no JSON on stdout (stderr={holder['stderr']!r})"
     for line in stdout_lines:
-        payload = json.loads(line)
+        payload: dict[str, Any] = json.loads(line)
         assert "connections" in payload
         assert "peak_active" in payload
     assert "TorsHammer" not in holder["stdout"], "banner leaked into the JSON stream"

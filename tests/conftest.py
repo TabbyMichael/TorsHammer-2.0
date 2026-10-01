@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ssl
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -463,7 +464,7 @@ async def _relay(a_reader, a_writer, b_reader, b_writer) -> None:
 
 
 @pytest.fixture
-async def slow_server():
+async def slow_server() -> AsyncIterator[SlowServer]:
     srv = SlowServer()
     await srv.start()
     yield srv
@@ -471,7 +472,7 @@ async def slow_server():
 
 
 @pytest.fixture
-async def fake_socks5():
+async def fake_socks5() -> AsyncIterator[FakeSocks5]:
     srv = FakeSocks5()
     await srv.start()
     yield srv
@@ -479,7 +480,7 @@ async def fake_socks5():
 
 
 @pytest.fixture
-async def fake_socks4():
+async def fake_socks4() -> AsyncIterator[FakeSocks4]:
     srv = FakeSocks4()
     await srv.start()
     yield srv
@@ -487,7 +488,7 @@ async def fake_socks4():
 
 
 @pytest.fixture
-async def fake_http_proxy():
+async def fake_http_proxy() -> AsyncIterator[FakeHttpProxy]:
     srv = FakeHttpProxy()
     await srv.start()
     yield srv
@@ -495,7 +496,7 @@ async def fake_http_proxy():
 
 
 @pytest.fixture
-async def fake_http_proxy_auth():
+async def fake_http_proxy_auth() -> AsyncIterator[FakeHttpProxy]:
     srv = FakeHttpProxy(require_auth=("user", "pass"))
     await srv.start()
     yield srv
@@ -503,7 +504,7 @@ async def fake_http_proxy_auth():
 
 
 @pytest.fixture
-async def fake_socks5_auth():
+async def fake_socks5_auth() -> AsyncIterator[FakeSocks5Auth]:
     srv = FakeSocks5Auth("user", "pass")
     await srv.start()
     yield srv
@@ -511,7 +512,7 @@ async def fake_socks5_auth():
 
 
 @pytest.fixture
-async def tls_server():
+async def tls_server() -> AsyncIterator[TlsServer]:
     srv = TlsServer()
     await srv.start()
     yield srv
@@ -519,7 +520,7 @@ async def tls_server():
 
 
 @pytest.fixture
-async def relay_socks5():
+async def relay_socks5() -> AsyncIterator[RelaySocks5]:
     srv = RelaySocks5()
     await srv.start()
     yield srv
