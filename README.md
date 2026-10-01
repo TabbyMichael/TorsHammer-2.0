@@ -47,7 +47,11 @@ What changed vs. the 2011 `legacy/` code:
   `slow-headers`, `slow-read`, `chunked`, `multipart-slow-upload`, `expect-continue-abuse`), a real
   `udp` flood, and 7 protocol-specific modes (`websocket-slow-upgrade`, `http-pipelining`,
   `range-abuse`, `cookie-bomb`, `jsonrpc-slow`, `smtp-slow-envelope`, `ftp-slow-command`)
-- **Two interchangeable backends** - identical mode set in the Python and Rust engines
+- **Two interchangeable backends** - identical 15-mode set in the Python and Rust engines.
+  The Rust engine covers plain HTTP and UDP with fail-closed dispatch (`os.execv` on
+  POSIX, spawned subprocess on Windows). HTTPS/TLS, proxies, and `--ramp-up` remain
+  Python-only; selecting them with `--backend rust` exits non-zero with an
+  explanation instead of silently downgrading.
 - **Asyncio-powered** - Tens of thousands of concurrent connections
 - **HTTPS/TLS support** - With SNI (Server Name Indication)
 - **Proxy support** - SOCKS5, SOCKS4a, HTTP CONNECT (including Tor)
@@ -230,7 +234,7 @@ Emits one newline-delimited JSON object per interval:
        ▼                                 ▼
 ┌─────────────┐                   ┌─────────────┐
 │   Profiles  │                   │  ProxyPool  │
-│ (12 modes)  │                   │ (rotation)  │
+│ (15 modes)  │                   │ (rotation)  │
 └──────┬──────┘                   └──────┬──────┘
        │                                 │
        ▼                                 ▼
@@ -251,9 +255,9 @@ Emits one newline-delimited JSON object per interval:
 
 **Modules:**
 - `cli.py` - Argument parsing, orchestration, signal handling
-- `config.py` - Configuration dataclass with validation
+- `config.py` - Configuration dataclass with validation + layered TOML/env settings
 - `engine.py` - Async attack engine with worker pool
-- `profiles.py` - Fourteen TCP attack profiles (7 classic slow modes + 7 protocol-specific modes)
+- `profiles.py` - Fourteen TCP attack profiles (7 classic slow modes + 7 protocol-specific modes); plus `udp` = 15 modes total
 - `udp.py` - UDP datagram flood mode
 - `conn.py` - Connection factory (plain, TLS, SOCKS5, SOCKS4a, HTTP CONNECT)
 - `proxies.py` - Proxy parsing and rotation

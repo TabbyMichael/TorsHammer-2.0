@@ -5,9 +5,17 @@ Tor's Hammer 2.0 ships **two integrated runtimes** that work through a unified C
 | Runtime | Language | Location | Purpose | Status |
 |---|---|---|---|---|
 | Python backend | Python 3.11+ | `src/torshammer/` | Main attack tool with asyncio engine | **Production-ready** |
-| Rust backend | Rust (edition 2021) | `rust/` | High-performance attack engine | **Production-ready** |
+| Rust backend | Rust (edition 2021) | `rust/` | High-performance attack engine | **Production-ready (plain HTTP)** |
 
-Both backends are **fully functional** and can be selected via the `--backend` flag in the unified CLI. Both support **real TCP/IP and UDP networking** with feature parity across all fifteen attack modes: `slow-post`, `slow-post-headers`, `slow-headers`, `slow-read`, `chunked`, `multipart-slow-upload`, `expect-continue-abuse`, `websocket-slow-upgrade`, `http-pipelining`, `range-abuse`, `cookie-bomb`, `jsonrpc-slow`, `smtp-slow-envelope`, `ftp-slow-command`, and the UDP flood.
+Both backends are **functional** and can be selected via the `--backend` flag in the unified CLI. Both support **real TCP/IP and UDP networking** with mode parity across all fifteen attack modes: `slow-post`, `slow-post-headers`, `slow-headers`, `slow-read`, `chunked`, `multipart-slow-upload`, `expect-continue-abuse`, `websocket-slow-upgrade`, `http-pipelining`, `range-abuse`, `cookie-bomb`, `jsonrpc-slow`, `smtp-slow-envelope`, `ftp-slow-command`, and the UDP flood.
+
+> **Capability matrix — `--backend rust` is fail-closed.** The Rust engine
+> currently targets plain HTTP only. Selecting `--backend rust` with an
+> unsupported option exits non-zero with an explanation (it never silently
+> downgrades): proxies/Tor (`--proxy*`, `--tor`, `--proxy-env`),
+> `--ssl-no-verify`, `--user-agents`, `--ramp-up`, HTTPS targets, and
+> `udp://` targets without `-m udp`. Use `--backend python` (the default)
+> for the full flag surface.
 
 ---
 

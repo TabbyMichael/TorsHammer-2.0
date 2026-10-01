@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Windows support fix + verification.** `import resource` is now guarded
+  (`cli.py`), so `import torshammer.cli` no longer raises `ModuleNotFoundError`
+  on Windows; `_check_fd_limits` degrades to a no-op. The multi-OS CI job runs
+  an explicit import smoke test.
+- **Real Rust backend dispatch (fail-closed).** `main()` now actually calls
+  `_forward_to_rust()`; on POSIX the process is replaced via `execv`, on
+  Windows the backend is spawned with `subprocess.run` and its exit code
+  mirrored. Flags the Rust engine cannot honor (`--proxy*`, `--tor`,
+  `--proxy-env`, `--ssl-no-verify`, `--user-agents`, `--ramp-up`, HTTPS
+  targets, `udp://` without `-m udp`) now exit non-zero with an explanation
+  instead of being silently dropped; `--backend` help text updated.
+- **Unified strict custom-header parsing.** `_parse_custom_headers` is now the
+  single path used by `--header` and `--header-file`: `:` is the only separator
+  (the legacy `Name=value` form is rejected), malformed entries and CR/LF
+  content fail closed (header-injection guard). `Config.custom_headers` is
+  narrowed to `dict[str, str]`; the `CustomHeadersDict.__contains__` hack and
+  the `list[str]` union were removed.
+- **`--dry-run`.** Resolves and prints target/backend/mode/TLS/proxy/header
+  summary without opening a single connection (target policy still applies).
+- **Layered settings (zero-dependency TOML).** `--config-file` loads defaults
+  from a TOML file (`torshammer.toml` or a `[tool.torshammer]` table in
+  `pyproject.toml`); `TORSHAMMER_*` environment variables fill unset flags.
+  Precedence: CLI > env > TOML > argparse default.
+- **Advisory mitigation verdict.** `torshammer.stats.classify_verdict()` plus
+  `verdict`/`verdict_reason` fields in the JSON stats stream and a `verdict:`
+  line in the final summary (`LIKELY_VULNERABLE` / `LIKELY_MITIGATED` /
+  `INCONCLUSIVE`). Advisory only — never influences exit codes.
+- **Release pipeline hardening.** `release.yml` now runs `twine check`,
+  captures a `pip freeze` SBOM input (+ optional CycloneDX), optionally signs
+  artifacts with `cosign` when available, publishes to PyPI (guarded on
+  `PYPI_API_TOKEN`), uploads generic packages to Forgejo (guarded on
+  `FORGEJO_TOKEN`/`FORGEJO_HOST`), and builds/smoke-tests/pushes the container
+  image (guarded on registry secrets). `Dockerfile` base pinned to
+  `python:3.12.11-slim-bookworm` with OCI `version`/`revision`/`source` labels.
+- **Proxy pool observability.** `ProxyPool.stats_summary()` reports
+  healthy/total; a fully-deprioritized pool now warns loudly on stderr while
+  it retries instead of failing silently.
+- CI: Windows/macOS/Linux import smoke test in the multi-OS job.
+- **Soak job (opt-in).** `scripts/soak.py` runs the real CLI at high
+  concurrency against a local asyncio sink and asserts a clean process exit
+  with no socket over-subscription (`peak_active`/`active` <= `-c`,
+  `connections > 0`); `.forgejo/workflows/soak.yml` runs it nightly/manually
+  and self-skips when the runner's descriptor budget is too small.
+- **Rust container image.** `Dockerfile.rust` builds `torshammer-rust` from
+  `rust:1.75-slim-bookworm` into a non-root `debian:bookworm-slim` runtime with
+  the same OCI provenance labels as the Python image.
+
+### Added (attack modes & coverage)
 - **Seven new attack modes**, implemented in both backends with identical CLI surface
   (`-m/--mode`), timing behaviour and test coverage:
   - `websocket-slow-upgrade` - leaks WebSocket upgrade headers and never completes the handshake
@@ -63,6 +111,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Docs drift:** README architecture diagram now says `(15 modes)`;
+  `profiles.py` module docstring documents the 14 TCP + UDP split;
+  `HOW_TO_RUN.md` marks the Rust backend as *Production-ready (plain
+  HTTP)* with a fail-closed capability matrix; `docs/cli.md` documents
+  `--dry-run`, `--config-file`, layered settings, the advisory verdict and
+  Rust dispatch semantics; `docs/security.md` documents the name-based
+  (non-IP-pinned) allowlist DNS-rebinding/TOCTOU limitation.
+- **`cli.py` decomposed (821 → ~360 lines):** target authorization policy moved
+  to `target.py`, CLI-to-Config resolution to `settings.py`, Rust dispatch to
+  `dispatch.py` and reporting (`_print_summary`, `_print_dry_run`) to
+  `summary.py`. All previous `from torshammer.cli import ...` names remain
+  available via an explicit `__all__` re-export block, so the split is
+  source-compatible; tests now patch `torshammer.dispatch` (the real
+  implementation module) for binary discovery and `os.execv`/`os.name`.
 - **Critical:** `src/torshammer/cli.py` no longer fails to compile (duplicate
   `randomize_path=` keyword argument) or crash at startup (missing
   `_check_fd_limits`, undefined banner output stream, orphaned statement).
