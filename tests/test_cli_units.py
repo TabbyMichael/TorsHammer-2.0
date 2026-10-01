@@ -549,3 +549,16 @@ def test_build_proxies_none_when_empty():
         tor=False,
     )
     assert _build_proxies(args) is None
+
+
+def test_pytest_dependency_warning_guidance():
+    """Verify pyproject.toml provides clear test dependencies in optional-dependencies.dev."""
+    import tomllib
+
+    pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    assert pyproject_path.exists()
+    data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    dev_deps = data["project"]["optional-dependencies"]["dev"]
+    assert any("pytest-cov" in dep for dep in dev_deps)
+    assert any("pytest-asyncio" in dep for dep in dev_deps)
+

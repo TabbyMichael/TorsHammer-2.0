@@ -89,8 +89,9 @@ jobs:
         python -m pip install pyyaml
         python - <<'PY'
         import pathlib, yaml
-        files = [".woodpecker.yml", *sorted(str(p) for p in pathlib.Path(".forgejo/workflows").glob("*.yml"))]
+        files = [".woodpecker.yml", *sorted(str(p) for p in pathlib.Path(".forgejo/workflows").glob("*.yml")), *sorted(str(p) for p in pathlib.Path(".github/workflows").glob("*.yml"))]
         for f in files:
             yaml.safe_load(pathlib.Path(f).read_text())
             print(f"OK {f}")
         PY
+

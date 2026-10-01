@@ -261,3 +261,22 @@ def test_main_reports_invalid_option_without_traceback(
     assert rc == 2
     assert "error: invalid option" in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_github_release_workflow_exists_and_validates():
+    """Ensure .github/workflows/release.yml exists and contains proper PyPI upload step."""
+    rel_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release.yml"
+    assert rel_path.exists(), "release.yml missing from .github/workflows"
+    content = rel_path.read_text(encoding="utf-8")
+    assert "pypa/gh-action-pypi-publish" in content
+    assert "python -m build" in content
+
+
+def test_github_soak_workflow_exists_and_validates():
+    """Ensure .github/workflows/soak.yml exists and executes scripts/soak.py."""
+    soak_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "soak.yml"
+    assert soak_path.exists(), "soak.yml missing from .github/workflows"
+    content = soak_path.read_text(encoding="utf-8")
+    assert "scripts/soak.py" in content
+
+
