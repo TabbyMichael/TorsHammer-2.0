@@ -400,7 +400,7 @@ Maintainers handle releases:
 4. Tag release
 5. Build distributions
 6. Publish to PyPI (if applicable)
-7. Create Forgejo release
+7. Create a GitHub release
 
 ## Getting Help
 
@@ -412,7 +412,7 @@ Maintainers handle releases:
 
 ### Discussions
 
-- Use Forgejo Discussions for broader topics
+- Use GitHub Discussions for broader topics
 - Be respectful and constructive
 - Search existing discussions first
 

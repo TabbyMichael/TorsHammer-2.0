@@ -27,6 +27,19 @@ def _print_summary(stats: Stats, json_output: bool = False) -> None:
     print("  errors             :", stats.errors, file=stream)
     print("  bytes sent         :", human_size(stats.bytes_sent), file=stream)
     print("  bytes received     :", human_size(stats.bytes_received), file=stream)
+    if stats.responses or stats.resp_latency_count:
+        print(
+            "  server responses   : "
+            f"{stats.responses} "
+            f"(2xx={stats.status_2xx} 3xx={stats.status_3xx} "
+            f"4xx={stats.status_4xx} 5xx={stats.status_5xx})",
+            file=stream,
+        )
+        print(
+            "  mean resp latency  :",
+            f"{stats.mean_response_latency:.2f}s",
+            file=stream,
+        )
     print("  elapsed            :", f"{int(uptime // 60)}:{int(uptime % 60):02d}", file=stream)
     print(f"  verdict            : {verdict} — {reason}", file=stream)
 

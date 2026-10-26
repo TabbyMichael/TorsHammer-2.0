@@ -446,18 +446,24 @@ python -m memory_profiler -m torshammer -u http://localhost:8080
 
 ## Continuous Integration
 
-Torshammer uses [Woodpecker CI](https://woodpecker-ci.org/), configured in
-[`.woodpecker.yml`](../.woodpecker.yml). The pipeline validates both the Python and
-Rust backends across Python 3.11 / 3.12 / 3.13 and Rust 1.75 on every push and pull
-request to `main` / `develop`.
+Torshammer mirrors the **same merge gate across two CI providers** so a push
+gets an identical verdict wherever it is reviewed:
+
+- [Woodpecker CI](https://woodpecker-ci.org/) — [`.woodpecker.yml`](../.woodpecker.yml)
+- GitHub Actions — [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
+
+Each pipeline validates both the Python and Rust backends across Python
+3.11 / 3.12 / 3.13 and Rust on every push and pull request to `main` /
+`develop`. `release.yml` and `soak.yml` live alongside the test workflow in the
+GitHub tree.
 
 ### What CI runs
 
 - **Python (`python:3.11-slim`, `python:3.12-slim`, `python:3.13-slim`)**
-  1. `pip install -u pip`
+  1. `python -m pip install --upgrade pip`
   2. `pip install -e ".[dev]"` (editable install — note the `.` before `[dev]`)
-  3. `pytest`
-  4. `pip install ruff mypy`
+  3. `pytest` (enforces `--cov-fail-under=85` via `pyproject.toml`)
+  4. `pip install ruff==0.16.2 mypy==2.3.0`
   5. `ruff check .`
   6. `ruff format --check .`
   7. `mypy src/`

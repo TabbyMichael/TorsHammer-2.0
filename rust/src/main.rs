@@ -6,12 +6,16 @@
 
 mod cli;
 mod engine;
+mod target_policy;
 
 use cli::banner::{self, BannerMeta};
 use cli::help;
 use cli::output::Output;
+use cli::progress::{self, human_elapsed, progress_line, Spinner, StepStatus, Symbols};
+use cli::table::Table;
 use cli::theme::{self, Theme};
-use engine::{url, EngineConfig};
+use engine::stats::{classify_verdict, human_size, Snapshot};
+use engine::{url, EngineConfig, Monitor};
 use std::process;
 
 /// Canonical program name used across the CLI surface.
@@ -21,27 +25,14 @@ pub const DESCRIPTION: &str = "Security Testing & Vulnerability Assessment Frame
 /// The version is sourced once from Cargo.toml (`CARGO_PKG_VERSION`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Attack modes implemented by the Rust engine.
+/// Attack modes accepted by the CLI.
 ///
-/// Kept in sync with `engine::profiles::run_profile` and the Python
-/// `PROFILES` registry (`src/torshammer/profiles.py`) plus the `udp` mode.
-pub const MODES: [&str; 15] = [
-    "slow-post",
-    "slow-post-headers",
-    "slow-headers",
-    "slow-read",
-    "chunked",
-    "multipart-slow-upload",
-    "expect-continue-abuse",
-    "websocket-slow-upgrade",
-    "http-pipelining",
-    "range-abuse",
-    "cookie-bomb",
-    "jsonrpc-slow",
-    "smtp-slow-envelope",
-    "ftp-slow-command",
-    "udp",
-];
+/// Sourced from the engine's single profile registry
+/// (`engine::profiles::TCP_MODES`) plus the `udp` datagram mode, so `--help`,
+/// argument validation and the cross-backend parity tests never drift.
+pub fn all_modes() -> Vec<&'static str> {
+    engine::profiles::mode_names()
+}
 
 /// Parsed runtime configuration for a scan invocation.
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +60,8 @@ struct Config {
     max_errors: usize,
     fail_under: usize,
     fail_on_zero: bool,
+    allow_public_targets: bool,
+    allowlist_file: Option<String>,
 }
 
 impl Default for Config {
@@ -96,6 +89,8 @@ impl Default for Config {
             max_errors: 0,
             fail_under: 0,
             fail_on_zero: false,
+            allow_public_targets: false,
+            allowlist_file: None,
         }
     }
 }
@@ -152,6 +147,8 @@ where
             "--fail-under" => cfg.fail_under = parse_usize(take_value(&args, &mut i, arg)?, arg)?,
             "--no-random-path" => cfg.no_random_path = true,
             "--fail-on-zero" => cfg.fail_on_zero = true,
+            "--allow-public-targets" => cfg.allow_public_targets = true,
+            "--allowlist-file" => cfg.allowlist_file = Some(take_value(&args, &mut i, arg)?),
             "--json" => cfg.json = true,
             "--no-color" => cfg.color = false,
             "--no-unicode" | "--ascii" => cfg.unicode = false,
@@ -210,6 +207,118 @@ pub fn version_line() -> String {
     format!("{PROGRAM} {VERSION}")
 }
 
+/// Human-facing live/summary renderer for the non-JSON output path.
+///
+/// Composes the reusable [`cli::progress`] building blocks (spinner, status
+/// symbols, elapsed timer, progress bar) for the live line and the
+/// [`cli::table`] renderer for the final summary. This is the presentation
+/// hook the engine calls via [`Monitor`]; it keeps all formatting/IO out of the
+/// engine itself.
+struct TtyMonitor {
+    duration: f64,
+    unicode: bool,
+    quiet: bool,
+    symbols: Symbols,
+    spinner: Spinner,
+    elapsed: progress::Elapsed,
+}
+
+impl TtyMonitor {
+    fn new(duration: f64, unicode: bool, quiet: bool) -> Self {
+        Self {
+            duration,
+            unicode,
+            quiet,
+            symbols: if unicode {
+                Symbols::unicode()
+            } else {
+                Symbols::ascii()
+            },
+            spinner: Spinner::new(unicode),
+            elapsed: progress::Elapsed::start(),
+        }
+    }
+}
+
+impl Monitor for TtyMonitor {
+    fn tick(&mut self, snap: &Snapshot, uptime: f64, sent_rate: f64, recv_rate: f64) {
+        use std::io::Write;
+        let frame = self.spinner.tick();
+        let status = StepStatus::Running.line(self.symbols, "attack");
+        let bar = if self.duration > 0.0 {
+            format!(
+                " {}",
+                progress_line((uptime / self.duration) as f32, 20, self.unicode)
+            )
+        } else {
+            String::new()
+        };
+        let line = format!(
+            "\r{frame} {status} | conns={} active={} done={} err={} | sent {} @{}/s | recv {} @{}/s | {}{bar}",
+            snap.connections,
+            snap.active,
+            snap.completed,
+            snap.errors,
+            human_size(snap.bytes_sent as f64),
+            human_size(sent_rate),
+            human_size(snap.bytes_received as f64),
+            human_size(recv_rate),
+            self.elapsed.as_display(),
+        );
+        print!("{line:<140}");
+        let _ = std::io::stdout().flush();
+    }
+
+    fn finish(&mut self, snap: &Snapshot, uptime: f64) {
+        if !self.quiet {
+            println!();
+        }
+        let status = if snap.errors > 0 {
+            StepStatus::Failed.line(self.symbols, "scan finished with errors")
+        } else {
+            StepStatus::Done.line(self.symbols, "scan finished")
+        };
+        let mut table = Table::new(["METRIC", "VALUE"]).with_unicode(self.unicode);
+        table.add_row([
+            "connections opened".to_string(),
+            snap.connections.to_string(),
+        ]);
+        table.add_row(["peak concurrent".to_string(), snap.peak_active.to_string()]);
+        table.add_row(["completed cycles".to_string(), snap.completed.to_string()]);
+        table.add_row(["errors".to_string(), snap.errors.to_string()]);
+        table.add_row(["bytes sent".to_string(), human_size(snap.bytes_sent as f64)]);
+        table.add_row([
+            "bytes received".to_string(),
+            human_size(snap.bytes_received as f64),
+        ]);
+        if snap.responses > 0 || snap.resp_latency_count > 0 {
+            table.add_row([
+                "server responses".to_string(),
+                format!(
+                    "{} (2xx={} 3xx={} 4xx={} 5xx={})",
+                    snap.responses,
+                    snap.status_2xx,
+                    snap.status_3xx,
+                    snap.status_4xx,
+                    snap.status_5xx
+                ),
+            ]);
+        }
+        if snap.resp_latency_count > 0 {
+            table.add_row([
+                "mean resp latency".to_string(),
+                format!("{:.2}s", snap.mean_response_latency()),
+            ]);
+        }
+        table.add_row(["elapsed".to_string(), human_elapsed(uptime as u64)]);
+        let (verdict, reason) = classify_verdict(snap);
+        table.add_row(["verdict".to_string(), verdict]);
+        table.add_row(["verdict reason".to_string(), reason]);
+        println!("{status}");
+        println!("{}", table.render(80));
+    }
+}
+
 /// Render the banner, build the engine config, and run the attack.
 fn run_scan(cfg: &Config) -> i32 {
     // In JSON mode stdout must stay a clean newline-delimited JSON stream, so
@@ -260,12 +369,32 @@ fn run_scan(cfg: &Config) -> i32 {
         return 2;
     }
 
-    if !MODES.contains(&cfg.mode.as_str()) {
+    let modes = all_modes();
+    if !modes.contains(&cfg.mode.as_str()) {
         let _ = output.error(&format!(
             "unknown attack mode: {} (choose {})",
             cfg.mode,
-            MODES.join(", ")
+            modes.join(", ")
         ));
+        return 2;
+    }
+
+    // Default-deny public targets, mirroring the Python wrapper so running the
+    // `torshammer-rust` binary directly cannot bypass the authorization guard.
+    let allowlist = match &cfg.allowlist_file {
+        Some(path) => match target_policy::load_allowlist(path) {
+            Ok(set) => set,
+            Err(err) => {
+                let _ = output.error(&err);
+                let _ = output.raw(help::error_hint());
+                return 2;
+            }
+        },
+        None => std::collections::HashSet::new(),
+    };
+    if let Err(err) = target_policy::check(&target.host, cfg.allow_public_targets, &allowlist) {
+        let _ = output.error(&err);
+        let _ = output.raw(help::error_hint());
         return 2;
     }
 
@@ -318,7 +447,11 @@ fn run_scan(cfg: &Config) -> i32 {
         "target={} mode={} concurrency={}",
         target.header_host, engine_cfg.mode, engine_cfg.concurrency
     ));
-    engine::run(engine_cfg)
+    // In JSON mode the engine writes newline-delimited JSON to stdout and never
+    // invokes the monitor, so this human renderer is only exercised on the
+    // non-JSON path (matching the Python backend's stream contract).
+    let mut monitor = TtyMonitor::new(cfg.duration, cfg.unicode, cfg.verbosity < 0);
+    engine::run(engine_cfg, &mut monitor)
 }
 
 /// Top-level dispatch. Returns the process exit code.
@@ -335,7 +468,13 @@ pub fn run() -> i32 {
             } else {
                 Theme::plain()
             };
-            let _ = Output::new(color, 0).raw(&help::render(PROGRAM, VERSION, &theme, color));
+            let _ = Output::new(color, 0).raw(&help::render(
+                PROGRAM,
+                VERSION,
+                &theme,
+                color,
+                &all_modes(),
+            ));
             0
         }
         Ok(Action::Run(cfg)) => run_scan(&cfg),
@@ -367,11 +506,12 @@ mod tests {
 
     #[test]
     fn mode_registry_is_unique_and_complete() {
-        assert_eq!(MODES.len(), 15, "fifteen modes are documented");
-        let mut sorted = MODES.to_vec();
+        let modes = all_modes();
+        assert_eq!(modes.len(), 32, "thirty-two modes are documented");
+        let mut sorted = modes.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), MODES.len(), "duplicate attack mode in MODES");
+        assert_eq!(sorted.len(), modes.len(), "duplicate attack mode in list");
         for mode in [
             "slow-post",
             "slow-post-headers",
@@ -387,9 +527,26 @@ mod tests {
             "jsonrpc-slow",
             "smtp-slow-envelope",
             "ftp-slow-command",
+            "imap-slow-literal",
+            "redis-resp-slow",
+            "postgres-startup-slow",
+            "dns-tcp-slow",
+            "nntp-slow-post",
+            "idle-hold",
+            "slow-xml",
+            "slow-form-parse",
+            "header-count-flood",
+            "websocket-slow-frame",
+            "req-smuggling-probe",
+            "h2-rapid-reset",
+            "h2-slow-streams",
+            "h2-continuation-flood",
+            "h2-hpack-drip",
+            "tls-slow-hello",
+            "tls-renego-hold",
             "udp",
         ] {
-            assert!(MODES.contains(&mode), "missing mode {mode}");
+            assert!(modes.contains(&mode), "missing mode {mode}");
         }
     }
 
@@ -430,6 +587,40 @@ mod tests {
             Action::Run(cfg) => assert_eq!(cfg.target, "http://localhost"),
             other => panic!("expected Run, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_args_allow_public_targets_flag() {
+        let args = ["--target", "http://example.com", "--allow-public-targets"];
+        match parse_args(args).expect("should parse") {
+            Action::Run(cfg) => assert!(cfg.allow_public_targets),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_args_allowlist_file_flag() {
+        let args = [
+            "--target",
+            "http://example.com",
+            "--allowlist-file",
+            "hosts.txt",
+        ];
+        match parse_args(args).expect("should parse") {
+            Action::Run(cfg) => assert_eq!(cfg.allowlist_file.as_deref(), Some("hosts.txt")),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_scan_refuses_public_target_without_opt_in() {
+        // Default-deny must abort with a usage error (2) before any worker
+        // connects; 8.8.8.8 is a genuinely public address.
+        let cfg = Config {
+            target: "http://8.8.8.8".to_string(),
+            ..Config::default()
+        };
+        assert_eq!(run_scan(&cfg), 2);
     }
 
     #[test]
@@ -483,5 +674,34 @@ mod tests {
         assert!(parse_args(args).is_err());
         let args = ["--bogus"];
         assert!(parse_args(args).is_err());
+    }
+
+    #[test]
+    fn tty_monitor_renders_live_and_summary_without_panic() {
+        let snap = Snapshot {
+            connections: 4,
+            active: 2,
+            peak_active: 3,
+            completed: 1,
+            errors: 0,
+            bytes_sent: 2048,
+            bytes_received: 512,
+            ..Snapshot::default()
+        };
+        // Exercises the progress (spinner/symbols/bar) and table renderers on
+        // the live tick and the final summary path.
+        let mut monitor = TtyMonitor::new(2.0, false, false);
+        monitor.tick(&snap, 0.5, 1024.0, 256.0);
+        monitor.finish(&snap, 1.5);
+    }
+
+    #[test]
+    fn summary_table_lists_metrics_and_elapsed() {
+        let mut table = Table::new(["METRIC", "VALUE"]).with_unicode(false);
+        table.add_row(["connections opened".to_string(), "4".to_string()]);
+        table.add_row(["elapsed".to_string(), human_elapsed(90)]);
+        let out = table.render(80);
+        assert!(out.contains("connections opened"));
+        assert!(out.contains("1:30"));
     }
 }

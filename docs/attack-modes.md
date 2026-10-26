@@ -2,16 +2,21 @@
 
 ## Overview
 
-Torshammer 2.0 implements **fifteen** distinct attack vectors designed to exhaust server resources through different protocol manipulation techniques. These include:
+Torshammer 2.0 implements **thirty-two** distinct attack vectors designed to exhaust server resources through different protocol manipulation techniques. These include:
 
 - **7 classic TCP slow-request modes** (HTTP slow attacks, all original responses to slowloris-era mitigations)
 - **1 UDP flood mode** (datagram-based flooding)
 - **7 advanced protocol-specific modes** (WebSocket, HTTP pipelining, application-layer, email/FTP)
+- **6 protocol-starvation modes** (IMAP, Redis, Postgres, DNS-over-TCP, NNTP, idle-connection hold)
+- **5 HTTP-parser / framing-abuse modes** (XML & form-parse starvation, header-count flood, slow WebSocket frame, request-smuggling probe)
+- **4 HTTP/2 framing / HPACK-abuse modes** (rapid reset, half-open slow streams, continuation flood, HPACK drip)
+- **2 TLS-handshake starvation modes** (starved ClientHello record, (re)handshake-initiation churn)
 
 Each mode targets different server components and uses different attack vectors for comprehensive security testing.
 
-All fifteen modes are implemented in **both** backends (Python `src/torshammer/profiles.py` +
-`src/torshammer/udp.py`, Rust `rust/src/engine/profiles.rs` + `rust/src/engine/udp.rs`) and are
+All thirty-two modes are implemented in **both** backends (Python `src/torshammer/profiles.py` +
+`src/torshammer/udp.py` + `src/torshammer/h2.py` + `src/torshammer/tls.py`, Rust `rust/src/engine/profiles.rs` +
+`rust/src/engine/udp.rs` + `rust/src/engine/h2.rs` + `rust/src/engine/tls.rs`) and are
 selectable through the same `-m` / `--mode` CLI flag.
 
 ## Attack Modes Summary
@@ -46,6 +51,63 @@ selectable through the same `-m` / `--mode` CLI flag.
 | `smtp-slow-envelope` | SMTP | Slowly send envelope commands | SMTP connection limits |
 | `ftp-slow-command` | FTP | Slowly send FTP commands | FTP connection limits |
 
+### Protocol-Starvation Modes
+
+These announce a protocol length/framing element the server then blocks waiting to
+read in full, and never complete it — pinning a request handler with only a handful
+of bytes on the wire.
+
+| Mode | Protocol | Mechanism | Primary Target |
+|------|----------|-----------|-----------------|
+| `imap-slow-literal` | IMAP4rev1 | `{N}` literal announced, literal bytes never delivered | Mailbox/IMAP worker slots |
+| `redis-resp-slow` | Redis RESP | `*1` multibulk with an oversized `$len` bulk, never closed | Redis read handler/clients limit |
+| `postgres-startup-slow` | PostgreSQL | StartupMessage length over-promised, terminator withheld | Forked per-connection backend |
+| `dns-tcp-slow` | DNS-over-TCP | 2-byte length prefix exceeds bytes actually sent | Resolver TCP query handler |
+| `nntp-slow-post` | NNTP | `POST` accepted, article dot-terminator never sent | Reader/NNTP process slots |
+| `idle-hold` | (any TCP) | Open the socket and send zero bytes forever | Connection/idle-slot limits |
+
+### HTTP-Parser / Framing-Abuse Modes
+
+These complete (or nearly complete) the request but abuse how the server *parses*
+it — over-promising a document/body the parser keeps buffering, exceeding header
+*counts* rather than header size, stalling a post-handshake WebSocket frame, or
+making a front-end and back-end disagree on message framing.
+
+| Mode | Mechanism | Primary Target |
+|------|-----------|-----------------|
+| `slow-xml` | Unclosed XML/`DOCTYPE` prolog + oversized `Content-Length`, body dribbled forever | XML/SOAP parsers, entity-expansion handling |
+| `slow-form-parse` | Huge urlencoded `Content-Length`, endless `key=value&` pairs trickle in | Framework body-parsers that pre-allocate per `Content-Length` |
+| `header-count-flood` | ~2000 tiny headers, then the request is *completed* | Per-header bookkeeping that caps bytes but not count |
+| `websocket-slow-frame` | Finish the upgrade, then stream a frame whose declared length never fills | Post-handshake WebSocket frame readers |
+| `req-smuggling-probe` | Ambiguous `Content-Length` **and** `Transfer-Encoding: chunked` | Front-end/back-end framing disagreement (request smuggling) |
+
+### HTTP/2 Framing / HPACK-Abuse Modes
+
+These speak real HTTP/2 (the connection preface, `SETTINGS`, and hand-built frames
+via `h2.py`/`h2.rs` — no HTTP/2 crates) and abuse the multiplexing, frame-reassembly
+and HPACK layers rather than the HTTP/1.x text parser.
+
+| Mode | Mechanism | Primary Target |
+|------|-----------|-----------------|
+| `h2-rapid-reset` | On one connection, open a rapid run of streams and `RST_STREAM` each immediately after its `HEADERS` (CVE-2023-44487 class) | Per-stream alloc/teardown + concurrency-accounting in HTTP/2 servers |
+| `h2-slow-streams` | Open many streams whose `HEADERS` omit `END_STREAM`, then dribble a byte of `DATA` forever without closing any | Half-open per-stream flow-control / buffer state |
+| `h2-continuation-flood` | Start a header block then keep it open with an unbounded run of `CONTINUATION` frames that never set `END_HEADERS` | Frame-reassembly buffering + per-frame accounting |
+| `h2-hpack-drip` | Feed one valid HPACK block a single octet per frame (`HEADERS` + `CONTINUATION`) with random delays, closing `END_HEADERS` only at the end | HTTP/2 analogue of slowloris: stalled header-block reassembly |
+
+### TLS-Handshake Starvation Modes
+
+These speak real TLS records (a hand-built `ClientHello` via `tls.py`/`tls.rs` — no TLS
+crates, no key exchange, the socket is left raw) and target the server's *handshake*
+reassembly path rather than the HTTP layer: an oversized record length is announced and
+never filled, so the handshake worker/connection slot stays pinned at near-zero bandwidth.
+Point them at a TLS listener over a plain `http://host:port` target so the raw handshake
+bytes reach the port unwrapped.
+
+| Mode | Mechanism | Primary Target |
+|------|-----------|-----------------|
+| `tls-slow-hello` | Announce a handshake record declaring the max record length, open a `ClientHello` inside it, then dribble a few bytes and never complete the record | Handshake reassembly buffer / connection slots |
+| `tls-renego-hold` | Repeatedly emit a fresh (partial) `ClientHello` record to churn (re)handshake initiation without ever completing one | Renegotiation/handshake state re-allocation |
+
 ## Mode Selection
 
 Use the `-m` or `--mode` flag:
@@ -71,6 +133,33 @@ torshammer -u http://example.com -m cookie-bomb
 torshammer -u http://example.com -m jsonrpc-slow
 torshammer -u http://example.com:25 -m smtp-slow-envelope
 torshammer -u http://example.com:21 -m ftp-slow-command
+
+# Protocol-starvation modes (target port must speak the matching protocol)
+torshammer -u http://example.com:143 -m imap-slow-literal
+torshammer -u http://example.com:6379 -m redis-resp-slow
+torshammer -u http://example.com:5432 -m postgres-startup-slow
+torshammer -u http://example.com:53 -m dns-tcp-slow
+torshammer -u http://example.com:119 -m nntp-slow-post
+torshammer -u http://example.com -m idle-hold
+
+# HTTP-parser / framing-abuse modes
+torshammer -u http://example.com -m slow-xml
+torshammer -u http://example.com -m slow-form-parse
+torshammer -u http://example.com -m header-count-flood
+torshammer -u http://example.com -m websocket-slow-frame
+torshammer -u http://example.com -m req-smuggling-probe
+
+# HTTP/2 framing / HPACK-abuse modes (target must serve HTTP/2; use --backend rust or
+# a build with h2c support, or front the target with an HTTP/2 cleartext listener)
+torshammer -u http://example.com -m h2-rapid-reset
+torshammer -u http://example.com -m h2-slow-streams
+torshammer -u http://example.com -m h2-continuation-flood
+torshammer -u http://example.com -m h2-hpack-drip
+
+# TLS-handshake starvation modes (point at a TLS listener over a raw http:// target so
+# the hand-built ClientHello bytes reach the port unwrapped)
+torshammer -u http://example.com:443 -m tls-slow-hello
+torshammer -u http://example.com:443 -m tls-renego-hold
 ```
 
 ## Slow POST Mode
@@ -1085,6 +1174,515 @@ Server-side defenses:
 - Monitor for slow command sequences
 - Limit connections per IP
 
+## IMAP Slow Literal Mode
+
+### Mechanism
+
+1. Send `<TAG> APPEND INBOX {N}\r\n` announcing an IMAP literal of `N` octets
+2. A conforming server replies `+ ` and blocks until it has read exactly `N` bytes
+3. Drip a handful of literal bytes, then never deliver the rest
+4. Hold the connection open indefinitely
+
+### How It Works
+
+The `{N}` literal tells the IMAP server that `N` opaque bytes follow. The server
+sizes its APPEND buffer and parks the mailbox worker inside its literal read.
+Because the promised bytes never arrive, that worker (and the mailbox it holds)
+stays pinned. `N` is randomized within the `--post-length` range and the tag is a
+random 4-character literal so connections do not share a fingerprint.
+
+### Target Systems
+
+- IMAP4rev1 servers (Dovecot, Courier, Microsoft Exchange)
+- Servers that allocate a worker/mailbox lock per in-flight command
+
+### Example
+
+```bash
+torshammer -u http://mail-server:143 -m imap-slow-literal -c 64 -d 60
+```
+
+### Countermeasures
+
+- Enforce an literal-arrival timeout, not just a command timeout
+- Cap concurrent incomplete APPEND literals per IP
+
+## Redis RESP Slow Mode
+
+### Mechanism
+
+1. Send a one-element multibulk frame `*1\r\n` followed by `$<len>\r\n`
+2. Redis reads `len` to size a bulk argument and waits for exactly `len` bytes + CRLF
+3. Emit a few bulk bytes, then stall with the terminating CRLF withheld
+
+### How It Works
+
+RESP bulk strings are length-prefixed; Redis commits a client read handler to
+buffering `len` bytes before it can dispatch the command. Declaring an oversized
+`$len` and never finishing it pins that client slot. The `maxclients` limit turns
+a handful of stalled connections into a denial of new clients.
+
+### Target Systems
+
+- Redis and RESP-speaking servers/caches
+
+### Example
+
+```bash
+torshammer -u http://redis-host:6379 -m redis-resp-slow -c 128 -d 60
+```
+
+### Countermeasures
+
+- Apply a per-client input buffer/idle timeout (`client-output-buffer-limit`, idle timeout)
+- Cap and reclaim stalled clients well below `maxclients`
+
+## Postgres Startup Slow Mode
+
+### Mechanism
+
+1. Send a StartupMessage: Int32 length (counting itself) + Int32 version `196608` (3.0)
+2. Follow with `user=...\0database=...\0` parameters but claim a larger length than sent
+3. Never emit the terminating NUL that closes the packet
+
+### How It Works
+
+PostgreSQL reads the 4-byte length, then `secure_read`s exactly that many octets
+before it will begin authentication. The backend process forked for the connection
+blocks in that read, tying up a process slot and the associated memory for the whole
+declared length that never lands.
+
+### Target Systems
+
+- PostgreSQL and other servers using a length-prefixed startup handshake
+
+### Example
+
+```bash
+torshammer -u http://db-host:5432 -m postgres-startup-slow -c 64 -d 60
+```
+
+### Countermeasures
+
+- Enforce a startup-packet timeout (`authentication_timeout` covers auth, not the length read)
+- Front with a connection proxy that validates the framing before forking a backend
+
+## DNS TCP Slow Mode
+
+### Mechanism
+
+1. Send the 2-byte big-endian TCP length prefix declaring a large DNS message
+2. Emit the 12-byte query header (ID `0xAABB`, `RD`, `QDCOUNT=1`) plus a couple of bytes
+3. Never complete the declared message
+
+### How It Works
+
+DNS-over-TCP (RFC 1035 §4.2.2) prefixes each message with its octet length. The
+resolver allocates a receive buffer of that size and blocks until the whole query
+arrives. Over-promising the length and under-delivering pins the TCP query handler.
+
+### Target Systems
+
+- Recursive/authoritative DNS servers with TCP support (BIND, Unbound, PowerDNS)
+
+### Example
+
+```bash
+torshammer -u http://dns-host:53 -m dns-tcp-slow -c 64 -d 60
+```
+
+### Countermeasures
+
+- Cap advertised TCP message sizes and apply a per-connection message timeout
+- Limit concurrent inbound TCP queries per source
+
+## NNTP Slow Post Mode
+
+### Mechanism
+
+1. Send `POST\r\n`; a server replies `340` and begins reading an article
+2. Drip header/body lines slowly (`X-<rand>: <rand>\r\n`)
+3. Never emit the terminating `\r\n.\r\n` dot-line
+
+### How It Works
+
+NNTP marks the end of a posted article with a line containing only a single `.`.
+The reader process holds the article buffer and its slot open until that terminator
+appears. Withholding it parks the process mid-transfer.
+
+### Target Systems
+
+- NNTP news servers (INN, DS, DNews)
+
+### Example
+
+```bash
+torshammer -u http://nntp-host:119 -m nntp-slow-post -c 64 -d 60
+```
+
+### Countermeasures
+
+- Apply an article-transfer timeout that starts at `340`, not at first byte
+- Limit concurrent unfinished POSTs per peer
+
+## Idle Hold Mode
+
+### Mechanism
+
+1. Open a TCP connection to the target
+2. Send **zero** bytes
+3. Hold the socket open until the run is stopped
+
+### How It Works
+
+Many servers cap concurrent connections (or idle worker slots) and only start a
+timeout/reaper once request bytes arrive. A silent, fully-open socket consumes a
+connection slot and file descriptor with no request to fingerprint, parse, or
+rate-limit. At scale this exhausts the accept backlog / connection table.
+
+### Target Systems
+
+- Thread- or process-per-connection servers with a bounded connection pool
+- Services that only arm their idle timeout after the first request line
+
+### Configuration Options
+
+- `-dl` / `-dh` - Min/max keep-alive interval (the socket is held with sleeps, never written to)
+
+### Example
+
+```bash
+torshammer -u http://example.com -m idle-hold -c 256 -d 120
+```
+
+### Countermeasures
+
+- Arm an accept-before-first-byte timeout on every connection
+- Enforce per-IP connection limits and a bounded backlog
+
+## Slow XML Mode
+
+### Also Known As
+
+- XML parser starvation
+- Billion-laughs / XXE-shaped slow body
+
+### Mechanism
+
+1. Send a POST with `Content-Type: application/xml` and an oversized `Content-Length`
+   (a multiple of the `--post-length` range)
+2. Emit an **unclosed** document prolog: `<?xml ...?><!DOCTYPE bomb [ <!ENTITY a "`
+3. Dribble body bytes one at a time, never closing the entity, DTD, or document
+
+### How It Works
+
+XML/SOAP stacks frequently buffer the whole document before handing it to a
+DOM/expat parser and pre-expand entity declarations while doing so. By announcing
+a large `Content-Length` and starting a `DOCTYPE`/entity that never terminates, the
+parser stays in its accumulate-and-validate stage, holding both the request buffer
+and (on pre-loading parsers) entity-expansion work. Unlike `slow-post` this targets
+the *XML* decoding path rather than the opaque body reader.
+
+### Target Systems
+
+- SOAP/XML-RPC endpoints and gateways
+- Stacks that parse the full document before processing (Java `DocumentBuilder`,
+  libxml2-backed PHP, .NET `XmlDocument`) before entity-expansion limits engage
+
+### Example
+
+```bash
+torshammer -u http://example.com/soap -m slow-xml --post-length 16384 -c 128 -d 60
+```
+
+### Countermeasures
+
+- Disable DTD/entity processing (or apply strict `XMLSecurityManager` / entity limits)
+- Stream-parse with hard byte budgets instead of buffering to `Content-Length`
+- Cap `Content-Length` and apply a body-read timeout
+
+## Slow Form Parse Mode
+
+### Mechanism
+
+1. Send a POST with `Content-Type: application/x-www-form-urlencoded` and a very
+   large `Content-Length`
+2. Emit an endless trickle of `key=value&` pairs (fresh random names per pair)
+3. Never fill the announced byte count, so the parse never finalizes
+
+### How It Works
+
+Many frameworks allocate their form-decoding buffer and per-field storage from the
+announced `Content-Length` up front, then split on `&`/`=`, URL-decode and validate
+each field as it arrives. Because the declared length is far larger than what is
+slowly delivered, the parser keeps a live, partially-parsed field map for the life
+of the connection — tying up the worker and the request-scoped memory.
+
+### Target Systems
+
+- Form handlers in PHP, Django, Rails, Spring (parameter-binding stages)
+- Servers that pre-allocate parse state from `Content-Length`
+
+### Example
+
+```bash
+torshammer -u http://example.com/submit -m slow-form-parse --post-length 32768 -c 128 -d 60
+```
+
+### Countermeasures
+
+- Do not pre-allocate from `Content-Length`; grow buffers incrementally with a cap
+- Bound the number of accepted form fields and total decoded size
+- Apply an aggregate request time budget
+
+## Header Count Flood Mode
+
+### Mechanism
+
+1. Send the request line and `Host:`
+2. Emit ~2000 tiny `X-<rand>: <rand>` headers, pausing every 64 lines
+3. **Complete** the header block with the terminating blank line, then hold the socket
+
+### How It Works
+
+Servers commonly cap total header *size* (which `slow-headers`/slowloris stays under)
+but place a much higher — or no — limit on header *count*. Each header still costs a
+list node, a hash-map entry and a lowercase/copy pass in the request object. Emitting
+thousands of minimal headers per connection multiplies that per-header cost, and
+because the request is actually completed this exercises a different code path than
+slowloris: post-parse handler work rather than a stuck header reader.
+
+### Target Systems
+
+- Servers/proxies that cap header bytes but not header entries
+- Frameworks building large case-insensitive header maps per request
+
+### Example
+
+```bash
+torshammer -u http://example.com -m header-count-flood -c 128 -d 60
+```
+
+### Countermeasures
+
+- Enforce a maximum header **count** per request, not only a maximum header size
+- Reject requests exceeding the limit early (before building the full header table)
+
+## WebSocket Slow Frame Mode
+
+### Mechanism
+
+1. Send a **complete** WebSocket upgrade request (proper `Sec-WebSocket-Key`, blank line)
+2. After the handshake, emit a binary frame header advertising a large masked payload
+   length (`FIN`+`0x81`, extended length `4096`, 4 mask bytes)
+3. Dribble payload bytes one at a time so the declared frame length is never satisfied
+
+### How It Works
+
+This is the post-handshake counterpart to `websocket-slow-upgrade`. That mode stalls
+the HTTP header parser; this one gets the upgrade accepted and then pins the *frame
+reader*: the server allocates an unmasking buffer sized from the frame's declared
+length and blocks until every payload byte arrives. Because the socket is already a
+WebSocket, HTTP-layer slowloris mitigations do not apply.
+
+### Target Systems
+
+- WebSocket servers that buffer a full frame before dispatch
+- Real-time/chat/game/notification backends past the handshake
+
+### Example
+
+```bash
+torshammer -u http://chat-server -m websocket-slow-frame -c 128 -d 60
+```
+
+### Countermeasures
+
+- Cap maximum frame size and apply a per-frame assembly timeout
+- Bound concurrent half-received frames per connection/IP
+
+## Request Smuggling Probe Mode
+
+### Mechanism
+
+1. Send a POST carrying **both** `Content-Length: 6` and `Transfer-Encoding: chunked`
+2. Follow with a body that is a valid final chunk (`0\r\n\r\n`) *and* a trailing
+   `GET /smuggled HTTP/1.1` request line
+3. Hold the socket open so the differential framing handling is observable
+
+### How It Works
+
+When a front-end and back-end disagree about whether `Content-Length` or
+`Transfer-Encoding` wins, the two requests they each see desynchronize — the
+signature of HTTP request smuggling (CL.TE). This mode sends the classic ambiguous
+CL.TE probe once and holds the connection so a test harness can observe whether a
+server/proxy accepts, rejects, or desynchronizes on the framing conflict. It is a
+*detection probe* for authorized testing, not an exploit payload.
+
+Framing headers the profile emits cannot be overridden by `--header`: any
+caller-supplied `Content-Length`, `Transfer-Encoding`, `Expect` or `Te` is stripped
+before the probe's own framing headers are added (in both backends), so the
+ambiguous request is always well-formed.
+
+### Target Systems
+
+- HTTP front-ends / reverse proxies / WAFs in front of a distinct back-end parser
+
+### Example
+
+```bash
+torshammer -u http://example.com -m req-smuggling-probe -c 32 -d 30
+```
+
+### Countermeasures
+
+- Normalize/reject requests bearing both `Content-Length` and `Transfer-Encoding`
+- Ensure front-end and back-end use the same framing rules and HTTP stack
+
+## HTTP/2 Rapid Reset Mode
+
+### Also Known As
+
+- HTTP/2 Rapid Reset (CVE-2023-44487 class)
+
+### Mechanism
+
+1. Send the HTTP/2 client preface + `SETTINGS` and a `SETTINGS` ACK
+2. On that single connection, emit a burst of `HEADERS` frames (each a complete,
+   self-contained request with `END_HEADERS | END_STREAM`) on fresh odd stream ids
+3. Immediately follow each `HEADERS` with a `RST_STREAM` (`NO_ERROR`)
+4. Loop forever, wrapping the stream id before the reserved boundary
+
+### How It Works
+
+Opening a stream makes the server allocate per-stream state (a request context,
+flow-control window, header table entry); a `RST_STREAM` tells it to tear that
+state down out of band. Because the reset arrives before the request could ever
+be served, the server does the expensive alloc/dealloc work repeatedly at
+near-zero bandwidth — the exact asymmetry the 2023 rapid-reset wave exploited.
+Frames and HPACK blocks are hand-built in `h2.py`/`h2.rs`, so no HTTP/2 library
+or prior negotiation is required.
+
+### Target Systems
+
+- HTTP/2 servers that count concurrent streams but do not rate-limit resets
+- Reverse proxies / load balancers multiplexing many back-end streams per connection
+
+### Example
+
+```bash
+torshammer -u http://example.com -m h2-rapid-reset -c 4 -d 60
+```
+
+### Countermeasures
+
+- Limit the number of RST_STREAM frames per unit time / per connection (the fix
+  shipped for CVE-2023-44487)
+- Cap concurrent streams and account reset-heavy streams against stream budgets
+
+## HTTP/2 Slow Streams Mode
+
+### Mechanism
+
+1. Send the HTTP/2 preface + `SETTINGS`/ACK
+2. Open 32 streams whose `HEADERS` set `END_HEADERS` but **not** `END_STREAM`
+   (each announces a `POST` that still owes a body)
+3. Round-robin a single byte of `DATA` onto each stream forever, never closing one
+
+### How It Works
+
+An HTTP/2 server that accepts a request without `END_STREAM` keeps the stream
+half-open: its flow-control window, receive buffer and per-stream bookkeeping
+stay live until the body completes or a timeout fires. By spreading a trickle of
+`DATA` across many such streams on one connection, the client pins a large amount
+of server-side per-stream state at a token-byte-per-second rate — the HTTP/2
+equivalent of holding many body-phase slow requests open at once.
+
+### Target Systems
+
+- HTTP/2 servers with generous per-connection stream limits and long body timeouts
+
+### Example
+
+```bash
+torshammer -u http://example.com -m h2-slow-streams -c 8 -d 120
+```
+
+### Countermeasures
+
+- Bound concurrent half-open streams per connection and per IP
+- Apply a per-stream inactivity/idle timeout, not just a whole-connection one
+
+## HTTP/2 Continuation Flood Mode
+
+### Mechanism
+
+1. Send the HTTP/2 preface + `SETTINGS`/ACK
+2. Open a header block with a `HEADERS` frame whose `END_HEADERS` is clear
+3. Keep the block open with an unbounded run of `CONTINUATION` frames (batches of
+   256), **never** setting `END_HEADERS`
+
+### How It Works
+
+RFC 7540 requires `CONTINUATION` frames to immediately follow a `HEADERS` (or
+prior `CONTINUATION`) frame whose `END_HEADERS` is clear, so the server cannot
+process anything else until the block closes. It must buffer the ever-growing
+reassembled header block while counting an ever-growing number of frames. The
+block is never completed, so reassembly state accumulates without bound until a
+framing/header-count limit trips — exercising a different path than the header
+*bytes* cap that `slow-headers` stays under.
+
+### Target Systems
+
+- HTTP/2 implementations that cap header size but not frame count or reassembly depth
+
+### Example
+
+```bash
+torshammer -u http://example.com -m h2-continuation-flood -c 4 -d 60
+```
+
+### Countermeasures
+
+- Enforce a maximum number of `CONTINUATION` frames / reassembled block size
+- Apply a header-block reassembly timeout
+
+## HTTP/2 HPACK Drip Mode
+
+### Mechanism
+
+1. Send the HTTP/2 preface + `SETTINGS`/ACK
+2. Build one valid HPACK header block (literal-without-indexing fields, no dynamic
+   table), then emit only its **first octet** in the `HEADERS` frame
+3. Feed the remaining octets one at a time via `CONTINUATION` frames, each after a
+   random delay, setting `END_HEADERS` only on the final byte
+4. Hold the connection open afterwards (the completed `POST` still owes a body)
+
+### How It Works
+
+This is the HTTP/2 analogue of a slowloris header drip, done at the framing/HPACK
+layer. HPACK blocks may be fragmented across `HEADERS` + `CONTINUATION` frames, so
+a server must reassemble the whole block before it can decode the headers. Sending
+one octet per frame with delays keeps that reassembly buffer and the stream pinned
+for as long as the server tolerates an incomplete header block. The blocks use only
+`0x00`-prefixed literal fields (never Huffman, never the dynamic table), so the
+stream is valid HPACK and no prior encoder state is assumed.
+
+### Target Systems
+
+- HTTP/2 servers with long header-block reassembly timeouts
+
+### Example
+
+```bash
+torshammer -u http://example.com -m h2-hpack-drip -dl 0.5 -dh 5.0 -c 64 -d 120
+```
+
+### Countermeasures
+
+- Bound the time an incomplete header block may stay half-received
+- Limit concurrent streams with open (unclosed) header blocks
+
 ## Randomization Techniques
 
 All HTTP-based attack modes (`slow-post`, `slow-post-headers`, `slow-headers`, `slow-read`,
@@ -1230,14 +1828,22 @@ torshammer -u udp://dns-server:53 -m udp -c 100 -d 60
 for mode in slow-post slow-post-headers slow-headers slow-read chunked \
             multipart-slow-upload expect-continue-abuse \
             websocket-slow-upgrade http-pipelining range-abuse cookie-bomb \
-            jsonrpc-slow smtp-slow-envelope ftp-slow-command; do
+            jsonrpc-slow smtp-slow-envelope ftp-slow-command \
+            imap-slow-literal redis-resp-slow postgres-startup-slow \
+            dns-tcp-slow nntp-slow-post idle-hold \
+            slow-xml slow-form-parse header-count-flood \
+            websocket-slow-frame req-smuggling-probe \
+            h2-rapid-reset h2-slow-streams h2-continuation-flood h2-hpack-drip \
+            tls-slow-hello tls-renego-hold; do
   torshammer -u http://server -m "$mode" -d 30 --json > "$mode.json"
 done
 ```
 
 Compare results to see which mode is most effective. Protocol-specific modes (`smtp-slow-envelope`,
 `ftp-slow-command`, `udp`) need a target service that speaks the matching protocol — pointing them at
-an HTTP listener only tests the HTTP listener's tolerance of foreign bytes.
+an HTTP listener only tests the HTTP listener's tolerance of foreign bytes. The `h2-*` modes need an
+HTTP/2 target and the `tls-*` modes need a TLS listener (point them at it over a raw `http://host:port`
+target so the hand-built handshake bytes reach the port unwrapped).
 
 ### Backend Support
 
@@ -1261,6 +1867,23 @@ randomizes from its built-in User-Agent pool instead of a `--user-agents` file.
 | `jsonrpc-slow` | ✅ | ✅ |
 | `smtp-slow-envelope` | ✅ | ✅ |
 | `ftp-slow-command` | ✅ | ✅ |
+| `imap-slow-literal` | ✅ | ✅ |
+| `redis-resp-slow` | ✅ | ✅ |
+| `postgres-startup-slow` | ✅ | ✅ |
+| `dns-tcp-slow` | ✅ | ✅ |
+| `nntp-slow-post` | ✅ | ✅ |
+| `idle-hold` | ✅ | ✅ |
+| `slow-xml` | ✅ | ✅ |
+| `slow-form-parse` | ✅ | ✅ |
+| `header-count-flood` | ✅ | ✅ |
+| `websocket-slow-frame` | ✅ | ✅ |
+| `req-smuggling-probe` | ✅ | ✅ |
+| `h2-rapid-reset` | ✅ | ✅ |
+| `h2-slow-streams` | ✅ | ✅ |
+| `h2-continuation-flood` | ✅ | ✅ |
+| `h2-hpack-drip` | ✅ | ✅ |
+| `tls-slow-hello` | ✅ | ✅ |
+| `tls-renego-hold` | ✅ | ✅ |
 | `udp` | ✅ | ✅ |
 
 ## Mode Comparison
@@ -1281,6 +1904,23 @@ randomizes from its built-in User-Agent pool instead of a `--user-agents` file.
 | `jsonrpc-slow` | HTTP/1.1 + JSON-RPC | No (claimed length never filled) | No | Very low | High |
 | `smtp-slow-envelope` | SMTP | No (no `DATA`) | No | Very low | Medium |
 | `ftp-slow-command` | FTP | No (no data transfer) | No | Very low | Medium |
+| `imap-slow-literal` | IMAP4rev1 | No (literal never delivered) | No | Very low | High |
+| `redis-resp-slow` | Redis RESP | No (bulk never closed) | No | Very low | High |
+| `postgres-startup-slow` | PostgreSQL | No (startup packet never terminated) | No | Very low | High |
+| `dns-tcp-slow` | DNS-over-TCP | No (query never completed) | No | Very low | High |
+| `nntp-slow-post` | NNTP | No (dot-terminator withheld) | No | Very low | High |
+| `idle-hold` | any TCP | No (zero bytes sent) | No | None | High |
+| `slow-xml` | HTTP/1.1 XML POST | No (document never closes) | No | Very low | High |
+| `slow-form-parse` | HTTP/1.1 urlencoded POST | No (length never filled) | No | Very low | High |
+| `header-count-flood` | HTTP/1.1 GET | Yes (~2000 headers) | No | Low | Medium |
+| `websocket-slow-frame` | HTTP/1.1 → WebSocket frames | Handshake yes; frame no | No | Very low | High |
+| `req-smuggling-probe` | HTTP/1.1 CL.TE | Yes (ambiguous framing) | No | Very low | Medium |
+| `h2-rapid-reset` | HTTP/2 (h2c) | Yes (HEADERS) then RST per stream | No | Very low | Medium |
+| `h2-slow-streams` | HTTP/2 (h2c) | No (streams half-open) | No | Very low | High |
+| `h2-continuation-flood` | HTTP/2 (h2c) | No (header block never closes) | No | Very low | High |
+| `h2-hpack-drip` | HTTP/2 (h2c) | No (HPACK block dribbled a byte/frame) | No | Very low | High |
+| `tls-slow-hello` | TLS handshake record | No (record never completed) | No | Very low | High |
+| `tls-renego-hold` | TLS handshake records | No (ClientHello records never completed) | No | Very low | High |
 | `udp` | UDP datagrams | N/A (stateless) | No | High (flood) | Low |
 
 ## Testing Methodology

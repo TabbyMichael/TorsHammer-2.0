@@ -62,10 +62,13 @@ pytest tests/test_cli.py::test_parse_https_url
 ### Run with Coverage
 
 ```bash
-pytest --cov=torshammer --cov-report=html
+pytest --cov=src/torshammer --cov-report=html
 ```
 
-**Note:** Coverage reporting requires `pytest-cov` (not currently in dependencies).
+**Note:** Coverage is enabled automatically — `pytest-cov` is part of the `dev`
+extra (`pip install -e ".[dev]"`) and `pyproject.toml` wires
+`addopts = "--cov=src/torshammer --cov-report=term-missing --cov-fail-under=85"`,
+so a plain `pytest` run already measures coverage and **fails below 85%**.
 
 ## Test Structure
 
@@ -201,8 +204,8 @@ pre-set stop event. The `udp` mode is covered separately by `tests/test_udp.py` 
 against a loopback receiver).
 
 **Tests:**
-- `test_profile_sends_bytes` - Parameterised across all fourteen TCP profiles: every profile sends data
-- `test_registry_exposes_the_documented_fifteen_modes` - Registry matches the documented modes
+- `test_profile_sends_bytes` - Parameterised across the TCP profiles: every profile sends data
+- `test_registry_matches_documented_modes` - Registry matches the canonical `tests/mode_list.txt`
 - `test_profile_honors_pre_set_stop` - Profiles respect stop signal
 - `test_slow_read_consumes_response` - Slow-read mode
 - `test_engine_runs_and_stops_cleanly` - Engine lifecycle
@@ -337,19 +340,19 @@ Each test should be independent:
 
 ## Continuous Integration
 
-This project uses **Forgejo Actions** for continuous integration via a self-hosted Forgejo instance.
+This project uses **GitHub Actions** for continuous integration.
 
-**Workflow location:** `.forgejo/workflows/test.yml`
+**Workflow location:** `.github/workflows/ci.yml`
 
-The Forgejo Actions workflow runs automatically on:
+The GitHub Actions workflow runs automatically on:
 - Push to the `main` branch
 - Pull requests targeting the `main` branch
 
 **Workflow configuration:**
 
 ```yaml
-# .forgejo/workflows/test.yml
-name: Test
+# .github/workflows/ci.yml
+name: CI
 
 on:
   push:
@@ -397,7 +400,8 @@ jobs:
           mypy src/
 ```
 
-**Note:** Forgejo reads workflows from `.forgejo/workflows/`. A `.github/workflows/` directory (used by GitHub.com) is not used by this project.
+**Note:** CI workflows live in `.github/workflows/` (`ci.yml`, `release.yml`,
+`soak.yml`).
 
 ## Soak Testing (opt-in)
 
@@ -415,26 +419,32 @@ It starts a local asyncio sink, runs the real CLI against it, and asserts a
 clean process exit with no socket over-subscription (`peak_active`/`active`
 must not exceed `-c`, and `connections > 0`). The script self-skips (exit 0)
 when the requested concurrency exceeds 80% of the runner's `RLIMIT_NOFILE`,
-so it is safe to schedule nightly — `.forgejo/workflows/soak.yml` does exactly
+so it is safe to schedule nightly — `.github/workflows/soak.yml` does exactly
 that, plus a manual `workflow_dispatch` trigger.
 
 ## Test Coverage
 
-To check test coverage:
+Coverage is measured and **enforced on every `pytest` run**. `pyproject.toml`
+sets `addopts = "--cov=src/torshammer --cov-report=term-missing
+--cov-fail-under=85"`, so the suite exits non-zero if line coverage drops below
+85%. `pytest-cov` ships with the `dev` extra, so no separate install is needed:
 
 ```bash
-# Install coverage tool
-pip install pytest-cov
+# Install the development extras (pytest, pytest-asyncio, pytest-cov, mypy)
+pip install -e ".[dev]"
 
-# Run tests with coverage
-pytest --cov=torshammer --cov-report=html
+# Coverage runs automatically with the suite and fails below 85%
+pytest
 
-# View report
-open htmlcov/index.html  # macOS
+# Opt into an HTML report as well
+pytest --cov-report=html
+open htmlcov/index.html      # macOS
 xdg-open htmlcov/index.html  # Linux
 ```
 
-**Note:** Coverage is not currently enforced or tracked.
+When working on a single module you can raise the bar or silence it for a local
+run with `pytest -o addopts=""` (skips the coverage gate) — but CI always
+enforces it.
 
 ## Troubleshooting Tests
 

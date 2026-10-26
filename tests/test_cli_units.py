@@ -19,6 +19,7 @@ from torshammer.cli import (
     _load_custom_body,
     _parse_custom_headers,
     _resolve_backend,
+    _resolve_config,
     build_parser,
 )
 from torshammer.config import Config
@@ -190,6 +191,68 @@ def test_resolve_backend_rust_keeps_rust_when_dev_build_exists(
     assert capsys.readouterr().err == ""
 
 
+def test_resolve_backend_auto_is_deferred():
+    """'auto' is returned unchanged: the concrete choice needs the full Config."""
+    assert _resolve_backend("auto") == "auto"
+
+
+def test_auto_selects_python_when_no_installed_binary(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("TORSHAMMER_RUST_BIN", raising=False)
+    monkeypatch.setattr(dispatch, "_find_rust_binary", lambda *a, **k: None)
+    args = build_parser().parse_args(["-u", "http://x.com", "--allow-public-targets"])
+    cfg = _resolve_config(args)
+    assert cfg.backend == "auto"
+    assert dispatch._resolve_auto_backend(cfg, args) == "python"
+
+
+def test_auto_selects_rust_when_installed_and_compatible(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    _rust_bin(monkeypatch, tmp_path)
+    args = build_parser().parse_args(["-u", "http://x.com", "--allow-public-targets"])
+    cfg = _resolve_config(args)
+    assert dispatch._resolve_auto_backend(cfg, args) == "rust"
+
+
+def test_auto_falls_back_to_python_when_incompatible(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """A Rust-incompatible run (HTTPS) must NOT auto-dispatch to rust."""
+    _rust_bin(monkeypatch, tmp_path)
+    args = build_parser().parse_args(["-u", "https://x.com", "--allow-public-targets"])
+    cfg = _resolve_config(args)
+    assert cfg.secure
+    assert dispatch._resolve_auto_backend(cfg, args) == "python"
+
+
+def test_rust_blockers_empty_for_plain_http():
+    args = build_parser().parse_args(
+        ["-u", "http://x.com", "--backend", "rust", "--allow-public-targets"]
+    )
+    cfg = _resolve_config(args)
+    assert dispatch._rust_blockers(cfg, args) == []
+
+
+def test_rust_blockers_flag_https_and_udp_mismatch():
+    https_args = build_parser().parse_args(["-u", "https://x.com", "--allow-public-targets"])
+    https_cfg = _resolve_config(https_args)
+    assert any("HTTPS" in b for b in dispatch._rust_blockers(https_cfg, https_args))
+
+    udp_args = build_parser().parse_args(["-u", "udp://127.0.0.1:53", "--backend", "rust"])
+    blockers = dispatch._rust_blockers(_rust_config(mode="slow-post"), udp_args)
+    assert any("requires -m udp" in b for b in blockers)
+
+
+def test_main_no_target_prints_quickstart(capsys: pytest.CaptureFixture[str]):
+    """A bare invocation prints a copy-pasteable quickstart and exits as a usage error."""
+    rc = cli.main([])
+    assert rc == 2
+    err = capsys.readouterr().err.lower()
+    assert "usage:" in err
+    assert "no target given" in err
+    assert "--allow-public-targets" in err
+
+
 def _rust_config(**overrides: Any) -> Config:
     defaults: dict[str, Any] = {
         "host": "example.com",
@@ -220,7 +283,7 @@ def test_forward_to_rust_exec_failure_exit_1(monkeypatch: pytest.MonkeyPatch, tm
     fake_bin = tmp_path / "torshammer-rust"
     fake_bin.write_text("#!/bin/sh\n")
     fake_bin.chmod(fake_bin.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setattr(cli, "_find_rust_binary", lambda: str(fake_bin))
+    monkeypatch.setattr(dispatch, "_find_rust_binary", lambda: str(fake_bin))
 
     def broken_execv(binary: str, argv: list[str]) -> None:
         raise OSError("no exec for you")
@@ -234,7 +297,7 @@ def _rust_bin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
     fake_bin = tmp_path / "torshammer-rust"
     fake_bin.write_text("#!/bin/sh\n")
     fake_bin.chmod(fake_bin.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setattr(dispatch, "_find_rust_binary", lambda: str(fake_bin))
+    monkeypatch.setattr(dispatch, "_find_rust_binary", lambda *a, **k: str(fake_bin))
     return str(fake_bin)
 
 
@@ -337,6 +400,45 @@ def test_forward_to_rust_forwards_headers_and_body(monkeypatch: pytest.MonkeyPat
     assert "--body-file" in argv
 
 
+def test_forward_to_rust_forwards_public_target_optin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """--allow-public-targets / --allowlist-file must survive the exec boundary.
+
+    The Rust backend now enforces its own default-deny target policy; if these
+    opt-in signals are not forwarded, a sanctioned public run would be wrongly
+    refused by the backend.
+    """
+    captured: dict[str, list[str]] = {}
+    _rust_bin(monkeypatch, tmp_path)
+    allowlist = tmp_path / "hosts.txt"
+    allowlist.write_text("example.com\n")
+
+    def fake_execv(binary: str, argv: list[str]) -> None:
+        captured["argv"] = argv
+        raise OSError("stop here")
+
+    monkeypatch.setattr(dispatch.os, "execv", fake_execv)
+    args = build_parser().parse_args(
+        [
+            "-u",
+            "http://example.com",
+            "--backend",
+            "rust",
+            "--allow-public-targets",
+            "--allowlist-file",
+            str(allowlist),
+        ]
+    )
+    from torshammer.cli import _resolve_config
+
+    assert _forward_to_rust(_resolve_config(args), args) == 1
+    argv = captured["argv"]
+    assert "--allow-public-targets" in argv
+    idx = argv.index("--allowlist-file")
+    assert argv[idx + 1] == str(allowlist)
+
+
 def test_forward_to_rust_windows_uses_subprocess(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """On Windows there is no execv; the backend is spawned and mirrored."""
     import subprocess
@@ -425,9 +527,7 @@ def test_forward_to_rust_warns_on_path_override(
     assert "ignoring --path override" in capsys.readouterr().err
 
 
-def test_forward_to_rust_forwards_optional_flags(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_forward_to_rust_forwards_optional_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Every mapped optional flag survives the exec boundary."""
     captured: dict[str, list[str]] = {}
     _rust_bin(monkeypatch, tmp_path)
@@ -562,3 +662,59 @@ def test_pytest_dependency_warning_guidance():
     assert any("pytest-cov" in dep for dep in dev_deps)
     assert any("pytest-asyncio" in dep for dep in dev_deps)
 
+
+def test_main_worker_mode_dispatches_to_run_worker(monkeypatch: pytest.MonkeyPatch):
+    """--worker must hand off to the worker server and skip config resolution."""
+    from torshammer import cli
+
+    seen: dict[str, str] = {}
+
+    async def fake_run_worker(bind: str, secret: str) -> int:
+        seen["bind"] = bind
+        seen["secret"] = secret
+        return 7
+
+    monkeypatch.setattr(cli, "run_worker", fake_run_worker)
+    monkeypatch.setenv("TORSHAMMER_CLUSTER_SECRET", "envsecret")
+    rc = cli.main(["--worker", "--cluster-bind", "127.0.0.1:1234"])
+    assert rc == 7
+    assert seen == {"bind": "127.0.0.1:1234", "secret": "envsecret"}
+
+
+def test_main_master_requires_workers_file(monkeypatch: pytest.MonkeyPatch):
+    """--master without --cluster-workers is a usage error (exit 2)."""
+    from torshammer import cli
+
+    rc = cli.main(["--master", "--url", "http://127.0.0.1:8080"])
+    assert rc == 2
+
+
+def test_main_master_dispatches_to_run_master(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """--master loads the workers file and delegates to run_master."""
+    from torshammer import cli
+
+    workers = tmp_path / "workers.txt"
+    workers.write_text("127.0.0.1:9001\n# comment\n127.0.0.1:9002\n")
+
+    seen: dict[str, object] = {}
+
+    async def fake_run_master(config, addrs, secret, task_id="task"):  # type: ignore[no-untyped-def]
+        seen["addrs"] = addrs
+        seen["secret"] = secret
+        return 5
+
+    monkeypatch.setattr(cli, "run_master", fake_run_master)
+    rc = cli.main(
+        [
+            "--master",
+            "--url",
+            "http://127.0.0.1:8080",
+            "--cluster-workers",
+            str(workers),
+            "--cluster-secret",
+            "abc",
+        ]
+    )
+    assert rc == 5
+    assert seen["addrs"] == ["127.0.0.1:9001", "127.0.0.1:9002"]
+    assert seen["secret"] == "abc"

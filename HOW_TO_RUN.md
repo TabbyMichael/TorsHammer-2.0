@@ -7,7 +7,7 @@ Tor's Hammer 2.0 ships **two integrated runtimes** that work through a unified C
 | Python backend | Python 3.11+ | `src/torshammer/` | Main attack tool with asyncio engine | **Production-ready** |
 | Rust backend | Rust (edition 2021) | `rust/` | High-performance attack engine | **Production-ready (plain HTTP)** |
 
-Both backends are **functional** and can be selected via the `--backend` flag in the unified CLI. Both support **real TCP/IP and UDP networking** with mode parity across all fifteen attack modes: `slow-post`, `slow-post-headers`, `slow-headers`, `slow-read`, `chunked`, `multipart-slow-upload`, `expect-continue-abuse`, `websocket-slow-upgrade`, `http-pipelining`, `range-abuse`, `cookie-bomb`, `jsonrpc-slow`, `smtp-slow-envelope`, `ftp-slow-command`, and the UDP flood.
+Both backends are **functional** and can be selected via the `--backend` flag in the unified CLI. Both support **real TCP/IP and UDP networking** with mode parity across all thirty-two attack modes: `slow-post`, `slow-post-headers`, `slow-headers`, `slow-read`, `chunked`, `multipart-slow-upload`, `expect-continue-abuse`, `websocket-slow-upgrade`, `http-pipelining`, `range-abuse`, `cookie-bomb`, `jsonrpc-slow`, `smtp-slow-envelope`, `ftp-slow-command`, `imap-slow-literal`, `redis-resp-slow`, `postgres-startup-slow`, `dns-tcp-slow`, `nntp-slow-post`, `idle-hold`, `slow-xml`, `slow-form-parse`, `header-count-flood`, `websocket-slow-frame`, `req-smuggling-probe`, `h2-rapid-reset`, `h2-slow-streams`, `h2-continuation-flood`, `h2-hpack-drip`, `tls-slow-hello`, `tls-renego-hold`, and the UDP flood.
 
 > **Capability matrix — `--backend rust` is fail-closed.** The Rust engine
 > currently targets plain HTTP only. Selecting `--backend rust` with an
@@ -54,14 +54,19 @@ pip install -e ".[dev]"
 
 ### 3. Run it
 
-Once installed you get the `torshammer` command. Both backends can be selected via the `--backend` flag:
+Once installed you get the `torshammer` command. The backend defaults to `auto`
+(Rust when it's installed and the run is compatible, otherwise Python); you can
+also force a specific engine with the `--backend` flag:
 
 ```bash
-# Default Python backend
+# Default: auto (Python unless a Rust binary is installed + compatible)
 torshammer -u http://localhost:8080
 
-# Use Rust backend for better performance
+# Force the Rust backend for better performance
 torshammer -u http://localhost:8080 --backend rust
+
+# Force the Python reference engine
+torshammer -u http://localhost:8080 --backend python
 
 # Or run as Python module
 python -m torshammer -u http://localhost:8080
@@ -245,10 +250,10 @@ Both backends are **production-ready** and offer the same feature set. The choic
   - Production environments where performance is critical
 
 **Performance Comparison:**
-- Python: Excellent for typical testing scenarios (0-500 concurrent connections), full TCP/UDP support
-- Rust: Optimized for high-load scenarios (500-5000+ concurrent connections), enhanced TCP/UDP performance
-- Both support all attack modes (including UDP), proxies, TLS, and automation features
-- Identical networking behavior: real TCP sockets and real UDP datagrams
+- Python: Excellent for typical testing scenarios (0-500 concurrent connections); full feature set including HTTPS/TLS, proxies, Tor and `--ramp-up`
+- Rust: Optimized for high-load scenarios (500-5000+ concurrent connections) with real TCP sockets and UDP datagrams
+- Both implement all thirty-two attack modes; the Rust request lines are now byte-for-byte protocol-correct (`HTTP/1.1`) for plain-HTTP targets
+- **But the Rust backend is fail-closed for transport extras:** it does **not** support HTTPS/TLS targets, proxies/Tor, `--ssl-no-verify`, or `--ramp-up`. Use `--backend python` when you need any of those (see the capability matrix at the top of this file)
 
 **Unified CLI:** Simply add `--backend rust` to any command to switch backends:
 ```bash

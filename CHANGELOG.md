@@ -9,6 +9,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Simpler running: `--backend auto` default, bare-invocation quickstart, and a
+  root `Makefile`.** `--backend` now defaults to `auto` instead of `python`: the
+  Rust engine is used transparently only when a *properly installed* binary is on
+  `PATH`/`TORSHAMMER_RUST_BIN` **and** the run is fully Rust-compatible; otherwise
+  the Python reference engine runs, so ordinary use is unchanged. `auto` never
+  discovers a repository-local `cargo build` (dev builds still require an explicit
+  `--backend rust`), so building the engine for development cannot silently change
+  what a normal run dispatches to. The Rust-incompatibility checks were extracted
+  into a single `dispatch._rust_blockers` shared by the fail-closed explicit-rust
+  path and the `auto` resolver so the two can never drift. Running `torshammer`
+  with no target now prints a copy-pasteable quickstart (exit `2`) instead of a
+  bare argparse usage dump, and a new root `Makefile` wraps the developer
+  workflows (`make help`/`test`/`lint`/`type`/`rust`/`check`). Behavior, all 32
+  modes and every flag are unchanged; the Python and Rust engines stay at parity.
+
+- **Two TLS-handshake starvation attack modes (both backends).** New modes
+  `tls-slow-hello` (announces a `ClientHello` whose TLS record length promises up to
+  the 16 KiB maximum but is only ever dribbled a few dozen bytes, pinning the
+  server's handshake-reassembly buffer) and `tls-renego-hold` (repeatedly emits
+  short over-promised `ClientHello` records so the server keeps re-arming a
+  half-received handshake) send *raw* TLS record bytes via a new dependency-free
+  record serializer (`src/torshammer/tls.py` and `rust/src/engine/tls.rs`) — no TLS
+  crates, only a hand-built `0x16 0x03 0x01` handshake record with an
+  over-declared length. Implemented identically in both backends, each mode
+  covered by a serializer unit test and a wire-invariant behavioral test that
+  re-parses the emitted record header and length. Total mode count 30 → 32.
+
+- **Four HTTP/2 framing / HPACK-abuse attack modes (both backends).** New modes
+  `h2-rapid-reset` (open many streams then `RST_STREAM` each immediately,
+  CVE-2023-44487 class), `h2-slow-streams` (half-open streams dribbled a byte of
+  `DATA` forever), `h2-continuation-flood` (unbounded `CONTINUATION` frames that
+  never set `END_HEADERS`) and `h2-hpack-drip` (one HPACK block fed a single octet
+  per frame, the HTTP/2 analogue of a slowloris header drip) speak *real* HTTP/2
+  wire bytes via a new dependency-free frame/HPACK builder (`src/torshammer/h2.py`
+  and `rust/src/engine/h2.rs`) — no HTTP/2 crates, only `0x00`-prefixed
+  literal-without-indexing HPACK. Implemented identically in both backends, each
+  mode covered by a builder unit test and a wire-invariant behavioral test that
+  parses the emitted frames. Total mode count 26 → 30.
+
+- **Five HTTP-parser / framing-abuse attack modes (both backends).** New modes
+  `slow-xml`, `slow-form-parse`, `header-count-flood`, `websocket-slow-frame`
+  and `req-smuggling-probe` target how a server *parses* a (nearly) complete
+  request: over-promised XML/form bodies the parser keeps buffering, a
+  header-count flood that then completes the request, a stalled post-handshake
+  WebSocket frame, and a CL.TE request-smuggling *detection probe*. Implemented
+  identically in `src/torshammer/profiles.py` and `rust/src/engine/profiles.rs`,
+  each with a behavioral wire-invariant test in both backends. Total mode count
+  21 → 26. Caller-supplied `Content-Length`/`Transfer-Encoding`/`Expect`/`Te`
+  headers are stripped before these modes add their own framing (both backends).
+
+### Removed
+
+- **Self-hosted Forgejo integration removed.** The `selfhost/` Forgejo
+  deployment (docker-compose, job image, runner config and instance data) and the
+  `.forgejo/workflows/` CI definitions were deleted; continuous integration now
+  runs from GitHub Actions (`.github/workflows/`) and Woodpecker
+  (`.woodpecker.yml`). Documentation (`docs/testing.md`, `docs/development.md`,
+  `docs/security.md`, `CONTRIBUTING.md`) and the CI parity check in
+  `.github/workflows/ci.yml` were rewired to drop Forgejo references.
+
+- **Container images dropped.** `Dockerfile` (Python) and `Dockerfile.rust` (Rust
+  backend) were deleted; no active CI/release workflow built or published images
+  (that step lived in the removed Forgejo release pipeline). Distribution is via
+  PyPI / `pipx` / building from source.
+
+### Fixed
+
+- **Rust `Rng::range_u8` overflow.** `range_u8(0, 255)` panicked in debug builds
+  (`attempt to add with overflow`) because the span `hi - lo + 1` was computed in
+  `u8`; it is now widened to `u64`. Surfaced by the new `websocket-slow-frame`
+  profile, whose mask bytes use the full `0..=255` range. Regression-tested.
+
+- **Six protocol-starvation attack modes (both backends).** New modes
+  `imap-slow-literal`, `redis-resp-slow`, `postgres-startup-slow`, `dns-tcp-slow`,
+  `nntp-slow-post` and `idle-hold` announce a length/framing element the server
+  blocks waiting to read in full, then never complete it. Implemented identically
+  in `src/torshammer/profiles.py` and `rust/src/engine/profiles.rs`, each with a
+  behavioral wire-invariant test in both backends. Total mode count 15 → 21.
+- **Foundation: single-source mode registry + impact metering parity.** The Rust
+  engine now dispatches, validates and renders `--help` from one `TCP_MODES` table;
+  response/latency impact metering and the advisory verdict were back-ported from
+  Python to Rust so both emit identical JSON telemetry. Config now validates the
+  mode against the registry (closing the `torshammer.toml` / `TORSHAMMER_MODE`
+  bypass), and `tests/test_mode_parity.py` mechanically enforces Python/Rust/docs
+  mode parity against the canonical `tests/mode_list.txt`.
+
 - **Windows support fix + verification.** `import resource` is now guarded
   (`cli.py`), so `import torshammer.cli` no longer raises `ModuleNotFoundError`
   on Windows; `_check_fd_limits` degrades to a no-op. The multi-OS CI job runs
@@ -50,7 +136,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Soak job (opt-in).** `scripts/soak.py` runs the real CLI at high
   concurrency against a local asyncio sink and asserts a clean process exit
   with no socket over-subscription (`peak_active`/`active` <= `-c`,
-  `connections > 0`); `.forgejo/workflows/soak.yml` runs it nightly/manually
+  `connections > 0`); `.github/workflows/soak.yml` runs it nightly/manually
   and self-skips when the runner's descriptor budget is too small.
 - **Rust container image.** `Dockerfile.rust` builds `torshammer-rust` from
   `rust:1.75-slim-bookworm` into a non-root `debian:bookworm-slim` runtime with

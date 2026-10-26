@@ -84,6 +84,13 @@ Torshammer 2.0 is designed for authorized security testing only. Users must:
 
 **Unauthorized use is illegal in most jurisdictions.**
 
+Both backends enforce a **default-deny target policy**: public hosts are
+refused unless you pass `--allow-public-targets` or list the host in
+`--allowlist-file`. The standalone `torshammer-rust` binary enforces the same
+policy directly, so running it without the Python wrapper cannot bypass the
+guard. The check is hostname-based (see [docs/security.md](docs/security.md)
+for the DNS-rebinding / TOCTOU limitation).
+
 ### Tool Limitations
 
 Torshammer 2.0 does NOT:
@@ -125,7 +132,8 @@ The tool does NOT handle:
 
 ### Network Security
 
-- **TLS Support:** HTTPS with SNI for secure connections
+- **TLS Support (Python backend):** HTTPS with SNI for secure connections. The
+  Rust backend is fail-closed for plain HTTP only and refuses HTTPS targets.
 - **Proxy Encryption:** Depends on proxy type (Tor provides encryption)
 - **Recommendation:** Use Tor or encrypted proxies for sensitive testing
 
@@ -144,7 +152,10 @@ The tool does NOT handle:
    - Have rollback procedures ready
 
 3. **Credential Management**
-   - Use environment variables for sensitive credentials
+   - Keep secrets out of the `TORSHAMMER_*` config layer (see
+     [docs/configuration.md](docs/configuration.md)); supply proxy credentials
+     inline or via `--proxy-env`, which reads the full proxy URL from a named
+     environment variable
    - Rotate credentials before and after testing
    - Do not commit credentials to version control
 
@@ -191,11 +202,13 @@ Torshammer 2.0 has **zero runtime dependencies** - it uses only Python 3.11+ sta
 
 **No third-party security vulnerabilities in runtime dependencies.**
 
-Development dependencies:
+Development dependencies (the `dev` extra in `pyproject.toml`):
 - `pytest>=8` - Test framework
 - `pytest-asyncio>=0.23` - Async test support
+- `pytest-cov>=5` - Coverage measurement (enforced at 85%)
+- `mypy>=1.0` - Static type checking
 
-**Version status has not been independently verified.**
+The Rust backend depends only on `base64`.
 
 ## Security Testing
 
@@ -223,11 +236,14 @@ Proxy credentials are passed in URLs and may be visible in:
 - Shell history
 - Logs (if output is redirected)
 
-**Mitigation:** Use environment variables (not yet supported), clear shell history, use read-only credentials.
+**Mitigation:** Pass the proxy URL via `--proxy-env VAR` (so the credential does
+not appear as a literal CLI argument), clear shell history, and use read-only
+credentials.
 
 ### TLS Verification Bypass
 
-The `--ssl-no-verify` flag disables certificate verification.
+The `--ssl-no-verify` flag disables certificate verification (Python backend
+only; the Rust backend refuses HTTPS targets).
 
 **Risk:** Man-in-the-middle attacks.
 
@@ -247,7 +263,8 @@ The tool does not validate authorization.
 
 **Risk:** Unauthorized use possible.
 
-**Mitigation:** Legal notice, user responsibility, documentation.
+**Mitigation:** Default-deny public-target policy, legal notice, user
+responsibility, documentation.
 
 ## Security Advisories
 

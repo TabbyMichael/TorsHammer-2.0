@@ -122,6 +122,36 @@ torshammer -u http://example.com --ssl  # Upgrades to HTTPS
 torshammer -u https://self-signed.example.com --ssl-no-verify
 ```
 
+#### `--backend <VALUE>`
+
+**Required:** No
+
+**Description:** Select the runtime engine.
+
+**Default:** `auto`
+
+**Choices:**
+
+- `auto` - Use the Rust engine only when a *properly installed* `torshammer-rust`
+  binary is found (on `PATH` or via `TORSHAMMER_RUST_BIN`) **and** the run uses no
+  feature the Rust engine lacks; otherwise use Python. A repository-local
+  `cargo build` is never picked up by `auto`, so building for development cannot
+  silently change what a normal run dispatches to.
+- `python` - The asyncio reference engine. Supports every flag and all 32 modes.
+- `rust` - The high-performance backend (plain HTTP + UDP). Always execs the Rust
+  binary and **fails closed** on flags it cannot honor (see below). A repository
+  dev build (`rust/target/{release,debug}`) is used only with this explicit choice.
+
+**Examples:**
+```bash
+torshammer -u http://example.com                 # auto: Rust if installed, else Python
+torshammer -u http://example.com --backend python  # force the reference engine
+torshammer -u http://example.com --backend rust    # force Rust (fail-closed)
+```
+
+**Note:** `auto` never silently drops a requested capability — if any blocker
+below is present it quietly runs Python instead of Rust.
+
 ### Attack Options
 
 #### `-m, --mode <MODE>`
@@ -719,11 +749,17 @@ codes. See `torshammer.stats.classify_verdict` for the exact thresholds.
 
 ### `--backend rust` fail-closed behaviour
 
-When `--backend rust` is selected, flags the Rust engine cannot honor
+When `--backend rust` is explicitly selected, flags the Rust engine cannot honor
 (`--proxy*`, `--tor`, `--proxy-env`, `--ssl-no-verify`, `--user-agents`,
 `--ramp-up`, HTTPS targets, `udp://` without `-m udp`) cause a **non-zero
 exit with an explanation** instead of a silent downgrade. Build the binary
 first (`cd rust && cargo build --release`) or set `TORSHAMMER_RUST_BIN`.
+
+Under the default `--backend auto` the *same* condition list is checked first,
+but instead of exiting it silently selects the Python engine — so a run using
+proxies, Tor or an HTTPS target always executes on Python rather than failing.
+The two paths share one source of truth (`dispatch._rust_blockers`), so they can
+never disagree about which features the Rust engine lacks.
 
 ## See Also
 

