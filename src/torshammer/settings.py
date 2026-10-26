@@ -16,9 +16,19 @@ from urllib.parse import urlparse
 
 from .config import Config
 from .dispatch import _resolve_backend
+from .profiles import PROFILES
 from .proxies import Proxy
 from .target import _check_target_policy, _load_allowlist
 from .useragents import load_user_agents
+
+
+def all_modes() -> list[str]:
+    """Canonical attack-mode list: the TCP profile registry plus ``udp``.
+
+    Single source of truth for the Python backend (``argparse`` ``choices``, the
+    runtime guard below and the cross-backend parity tests all derive from it).
+    """
+    return sorted({*PROFILES, "udp"})
 
 
 def _parse_custom_headers(raw_headers: list[str]) -> list[str]:
@@ -120,6 +130,13 @@ def _resolve_config(args: argparse.Namespace) -> Config:
         header_host = f"{host_for_header}:{port}"
 
     assert port is not None
+    # A ``udp`` target forces the datagram mode; otherwise use the requested
+    # mode. Validate against the registry here (not just ``argparse`` choices)
+    # so a bogus mode injected via ``torshammer.toml`` / ``TORSHAMMER_MODE`` env
+    # is rejected too, rather than reaching the engine and raising KeyError.
+    mode = "udp" if force_udp else args.mode
+    if mode != "udp" and mode not in PROFILES:
+        raise ValueError(f"unknown attack mode: {mode!r} (choose from {', '.join(all_modes())})")
     config = Config(
         host=host,
         port=port,
@@ -127,7 +144,7 @@ def _resolve_config(args: argparse.Namespace) -> Config:
         path=path,
         header_host=header_host,
         concurrency=max(1, args.concurrency),
-        mode="udp" if force_udp else args.mode,
+        mode=mode,
         backend=_resolve_backend(args.backend),
         base_post_length=max(1, args.post_length),
         delay_min=args.delay_min,

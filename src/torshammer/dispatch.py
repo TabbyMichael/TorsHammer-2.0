@@ -18,14 +18,24 @@ import sys
 from .config import Config
 
 
-def _find_rust_binary() -> str | None:
-    """Locate the Rust backend binary (env var, PATH, or repo-relative build)."""
+def _find_rust_binary(*, include_repo_build: bool = True) -> str | None:
+    """Locate the Rust backend binary (env var, PATH, and optionally repo build).
+
+    ``include_repo_build`` controls whether a repository-local
+    ``rust/target/{release,debug}/torshammer-rust`` development build counts as
+    "available". It is ``True`` for an explicit ``--backend rust`` (a developer
+    who just ran ``cargo build`` gets their build used) and ``False`` for the
+    ``auto`` resolver, so merely building the engine for development never
+    silently changes what a normal run dispatches to.
+    """
     env_bin = os.environ.get("TORSHAMMER_RUST_BIN")
     if env_bin and os.path.isfile(env_bin) and os.access(env_bin, os.X_OK):
         return env_bin
     found = shutil.which("torshammer-rust")
     if found:
         return found
+    if not include_repo_build:
+        return None
     # Dev-install layout: <repo>/rust/target/{release,debug}/torshammer-rust
     here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     for rel in ("target/release/torshammer-rust", "target/debug/torshammer-rust"):
@@ -47,6 +57,10 @@ def _resolve_backend(requested: str) -> str:
     """
     if requested == "python":
         return "python"
+    if requested == "auto":
+        # The concrete choice needs the full Config (feature set in use), so it
+        # is deferred to :func:`_resolve_auto_backend`, called from ``main()``.
+        return "auto"
     if _find_rust_binary() is not None:
         return "rust"
     print(
@@ -56,6 +70,56 @@ def _resolve_backend(requested: str) -> str:
         file=sys.stderr,
     )
     return "python"
+
+
+def _rust_blockers(config: Config, args: argparse.Namespace) -> list[str]:
+    """Return reasons this run cannot be honored by the Rust backend (empty == OK).
+
+    Single source of truth shared by the fail-closed explicit ``--backend rust``
+    path (:func:`_forward_to_rust`) and the ``auto`` resolver
+    (:func:`_resolve_auto_backend`), so the two can never drift on which features
+    the Rust engine lacks.
+    """
+    blockers: list[str] = []
+    if config.secure:
+        blockers.append(
+            "the rust backend does not support HTTPS yet. Use the python backend "
+            "(default) or point at an http target."
+        )
+    if config.proxies:
+        blockers.append(
+            "--backend rust does not support proxies/Tor; use --backend python instead."
+        )
+    if not config.ssl_verify:
+        blockers.append(
+            "--backend rust does not support --ssl-no-verify; use --backend python instead."
+        )
+    if getattr(args, "user_agents", None):
+        blockers.append(
+            "--backend rust does not support --user-agents; use --backend python instead."
+        )
+    if config.ramp_up:
+        blockers.append("--backend rust does not support --ramp-up; use --backend python instead.")
+    url = getattr(args, "url", None)
+    if url and str(url).lower().startswith("udp://") and config.mode != "udp":
+        blockers.append("--backend rust requires -m udp for udp:// targets.")
+    return blockers
+
+
+def _resolve_auto_backend(config: Config, args: argparse.Namespace) -> str:
+    """Resolve ``--backend auto`` to a concrete engine.
+
+    Prefers the Rust engine only when a *properly installed* binary (``PATH`` or
+    ``TORSHAMMER_RUST_BIN``, never a repository-local dev build) exists **and**
+    the run uses no feature the Rust engine lacks; otherwise it falls back to the
+    Python reference engine. This is what makes a normal run "just work" without
+    ever silently dropping a requested capability.
+    """
+    if _find_rust_binary(include_repo_build=False) is None:
+        return "python"
+    if _rust_blockers(config, args):
+        return "python"
+    return "rust"
 
 
 def _forward_to_rust(config: Config, args: argparse.Namespace) -> int:
@@ -75,42 +139,11 @@ def _forward_to_rust(config: Config, args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 127
-    if config.secure:
-        print(
-            "error: the rust backend does not support HTTPS yet. Use the python "
-            "backend (default) or point at an http target.",
-            file=sys.stderr,
-        )
-        return 1
-    if config.proxies:
-        print(
-            "error: --backend rust does not support proxies/Tor; use --backend python instead.",
-            file=sys.stderr,
-        )
-        return 1
-    if not config.ssl_verify:
-        print(
-            "error: --backend rust does not support --ssl-no-verify; use --backend python instead.",
-            file=sys.stderr,
-        )
-        return 1
-    if args.user_agents:
-        print(
-            "error: --backend rust does not support --user-agents; use --backend python instead.",
-            file=sys.stderr,
-        )
-        return 1
-    if config.ramp_up:
-        print(
-            "error: --backend rust does not support --ramp-up; use --backend python instead.",
-            file=sys.stderr,
-        )
-        return 1
-    if args.url and args.url.lower().startswith("udp://") and config.mode != "udp":
-        print(
-            "error: --backend rust requires -m udp for udp:// targets.",
-            file=sys.stderr,
-        )
+    # Fail closed on any feature the Rust engine cannot honor: a quiet downgrade
+    # would be a security bug (e.g. traffic believed anonymised when it is not).
+    blockers = _rust_blockers(config, args)
+    if blockers:
+        print(f"error: {blockers[0]}", file=sys.stderr)
         return 1
     if args.path and args.path != config.path:
         print(
@@ -168,6 +201,13 @@ def _forward_to_rust(config: Config, args: argparse.Namespace) -> int:
         argv += ["--fail-under", str(config.fail_under)]
     if config.fail_on_zero:
         argv += ["--fail-on-zero"]
+    # The Rust engine now enforces the same default-deny target policy as the
+    # Python wrapper; forward the operator's explicit authorization so a
+    # sanctioned public-target run is not refused by the backend.
+    if config.allow_public_targets:
+        argv += ["--allow-public-targets"]
+    if args.allowlist_file:
+        argv += ["--allowlist-file", args.allowlist_file]
 
     if os.name == "nt":
         # os.execv has no Windows equivalent that replaces the process image;

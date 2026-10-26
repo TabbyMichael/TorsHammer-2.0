@@ -37,21 +37,30 @@ What changed vs. the 2011 `legacy/` code:
 | Broken thread shutdown (`join()` list bug) | `asyncio.Event` stop flag + SIGINT/SIGTERM cleanup |
 | Bundled SocksiPy (broken SOCKS5 auth) | Built-in async SOCKS5/SOCKS4a/HTTP CONNECT |
 | Single Tor endpoint | Proxy list + rotation |
-| No coverage of modern mitigations | 15 vectors (7 classic TCP + UDP + 7 protocol-specific) |
+| No coverage of modern mitigations | 32 vectors (slowloris, protocol-starvation, HTTP/2, TLS handshake) |
 | No stats, no duration control | Live stats line, JSON output, `--duration` |
 
 ## Features
 
 - **Zero runtime dependencies** - Python 3.11+ standard library only
-- **Fifteen attack modes** - 7 classic TCP slow-request modes (`slow-post`, `slow-post-headers`,
+- **Thirty-two attack modes** - 7 classic TCP slow-request modes (`slow-post`, `slow-post-headers`,
   `slow-headers`, `slow-read`, `chunked`, `multipart-slow-upload`, `expect-continue-abuse`), a real
-  `udp` flood, and 7 protocol-specific modes (`websocket-slow-upgrade`, `http-pipelining`,
-  `range-abuse`, `cookie-bomb`, `jsonrpc-slow`, `smtp-slow-envelope`, `ftp-slow-command`)
-- **Two interchangeable backends** - identical 15-mode set in the Python and Rust engines.
-  The Rust engine covers plain HTTP and UDP with fail-closed dispatch (`os.execv` on
-  POSIX, spawned subprocess on Windows). HTTPS/TLS, proxies, and `--ramp-up` remain
-  Python-only; selecting them with `--backend rust` exits non-zero with an
-  explanation instead of silently downgrading.
+  `udp` flood, 7 protocol-specific modes (`websocket-slow-upgrade`, `http-pipelining`,
+  `range-abuse`, `cookie-bomb`, `jsonrpc-slow`, `smtp-slow-envelope`, `ftp-slow-command`), 6
+  protocol-starvation modes (`imap-slow-literal`, `redis-resp-slow`, `postgres-startup-slow`,
+  `dns-tcp-slow`, `nntp-slow-post`, `idle-hold`), 5 HTTP-parser / framing-abuse modes
+  (`slow-xml`, `slow-form-parse`, `header-count-flood`, `websocket-slow-frame`, `req-smuggling-probe`),
+  4 HTTP/2 framing / HPACK-abuse modes (`h2-rapid-reset`, `h2-slow-streams`,
+  `h2-continuation-flood`, `h2-hpack-drip`) and 2 TLS-handshake starvation modes
+  (`tls-slow-hello`, `tls-renego-hold`)
+- **Two interchangeable backends** - identical 32-mode set in the Python and Rust engines.
+  By default `--backend auto` transparently uses the Rust engine only when it is *installed*
+  (on `PATH`/`TORSHAMMER_RUST_BIN`) **and** the run is fully Rust-compatible; otherwise it
+  runs the Python engine, so ordinary use never changes behaviour. The Rust engine covers
+  plain HTTP and UDP with fail-closed dispatch (`os.execv` on POSIX, spawned subprocess on
+  Windows). HTTPS/TLS, proxies, and `--ramp-up` remain Python-only: an explicit
+  `--backend rust` with such flags exits non-zero with an explanation instead of silently
+  downgrading, and `auto` quietly falls back to Python.
 - **Asyncio-powered** - Tens of thousands of concurrent connections
 - **HTTPS/TLS support** - With SNI (Server Name Indication)
 - **Proxy support** - SOCKS5, SOCKS4a, HTTP CONNECT (including Tor)
@@ -70,21 +79,36 @@ What changed vs. the 2011 `legacy/` code:
 
 ## Installation
 
-### Linux / macOS
+Torshammer ships as a pure-Python package (the `torshammer` command, **zero
+runtime dependencies**) with an optional high-performance Rust backend. Pick the
+path that suits you.
+
+### 1. Download the source
+
+```bash
+git clone https://github.com/TabbyMichael/TorsHammer-2.0.git
+cd TorsHammer-2.0
+```
+
+### 2. Install the Python CLI
+
+**Recommended — isolated install with `pipx`** (no venv to babysit; puts
+`torshammer` on your PATH):
+
+```bash
+pipx install .
+# manage it later: pipx upgrade torshammer  |  pipx uninstall torshammer
+```
+
+**Or a virtual environment** (Linux / macOS):
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e .            # use ".[dev]" to also pull pytest, mypy and ruff
 ```
 
-For development (includes pytest):
-
-```bash
-pip install -e ".[dev]"
-```
-
-### Windows
+**Windows (CMD / PowerShell):**
 
 ```cmd
 python -m venv .venv
@@ -92,10 +116,22 @@ python -m venv .venv
 pip install -e .
 ```
 
-For development:
+No `pipx` and don't want a venv? Run `python -m pip install --user .`, or skip
+installing entirely and invoke it straight from the checkout with
+`python -m torshammer`.
 
-```cmd
-pip install -e ".[dev]"
+### 3. Build the Rust backend (optional)
+
+Only needed for extreme concurrency on plain-HTTP/UDP targets. With the default
+`--backend auto` it is picked up **automatically** once installed on your `PATH`
+(or via `TORSHAMMER_RUST_BIN`) and the run is Rust-compatible — otherwise the
+Python engine is used. It is **never installed by default**, and the Python
+engine already covers all 32 modes and every flag.
+
+```bash
+cd rust && cargo build --release
+# binary: rust/target/release/torshammer-rust
+# auto-discovered next to the checkout, or set TORSHAMMER_RUST_BIN=/abs/path
 ```
 
 ### Windows-Specific Considerations
@@ -113,20 +149,45 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
-1. **Install the tool** (see Installation above)
-2. **Test against an authorized target**:
+The tool needs exactly one thing — a target URL you are authorized to test:
 
 ```bash
-torshammer -u http://localhost:8080
+torshammer -u http://localhost:8080            # slow-post, 256 connections, until Ctrl-C
 ```
 
-3. **Monitor the output**:
+Run it bare (`torshammer`, no target) and it prints this same copy-pasteable
+quickstart instead of a cryptic error. Backend selection is automatic
+(`--backend auto`): the Rust engine is used when it's installed and the run is
+compatible, otherwise Python — you rarely need to think about it.
 
-```
-thm | conns=256 open=256 done=12 err=0 | sent 45.2 KB @ 12.3 KB/s | recv 0.0 B | 0:15
-```
+1. **Preview first** — resolves and prints the effective config but opens
+   **zero** connections:
 
-4. **Stop with Ctrl-C** when done
+   ```bash
+   torshammer -u http://localhost:8080 --dry-run
+   ```
+
+2. **Run a bounded test** and watch the live stats line:
+
+   ```bash
+   torshammer -u http://localhost:8080 -c 128 -d 30
+   ```
+
+   ```
+   thm | conns=128 open=128 done=12 err=0 | sent 45.2 KB @ 12.3 KB/s | recv 0.0 B | 0:15
+   ```
+
+3. **Stop anytime** with `Ctrl-C` — workers shut down gracefully and a final
+   summary (including an advisory mitigation verdict) is printed.
+
+> **Running it other ways:** `python -m torshammer ...` (straight from the
+> checkout) and `pipx run` behave identically to the installed `torshammer`
+> command — same flags, same output.
+
+> **Safety guardrail:** by default only loopback/private hosts are permitted.
+> Targeting a public host requires an explicit `--allow-public-targets` (or the
+> host listed in `--allowlist-file`) so you can't accidentally test a third-party
+> system.
 
 ## Usage
 
@@ -165,7 +226,7 @@ By default the tool refuses to target public internet hosts unless the operator 
 |---|---|---|
 | `-u, --url` | Target URL (`http://`, `https://` or `udp://`) | required |
 | `-c, --concurrency` | Concurrent sockets | 256 |
-| `-m, --mode` | `slow-post` \| `slow-post-headers` \| `slow-headers` \| `slow-read` \| `chunked` \| `multipart-slow-upload` \| `expect-continue-abuse` \| `websocket-slow-upgrade` \| `http-pipelining` \| `range-abuse` \| `cookie-bomb` \| `jsonrpc-slow` \| `smtp-slow-envelope` \| `ftp-slow-command` \| `udp` | `slow-post` |
+| `-m, --mode` | Attack mode — any of the 32 listed under [Features](#features) and detailed in [Attack Modes](docs/attack-modes.md) | `slow-post` |
 | `-dl / -dh` | Min/max dribble delay (s) | 0.1 / 3.0 |
 | `-d, --duration` | Auto-stop after N s (0 = until Ctrl-C) | 0 |
 | `--post-length` | Baseline `Content-Length` for slow-post/slow-post-headers/chunked (byte budget for `udp`) | 4096 |
@@ -173,7 +234,7 @@ By default the tool refuses to target public internet hosts unless the operator 
 | `--proxy` / `--proxy-list` | Single proxy URL / file of proxy URLs | none |
 | `--rotate-proxies` | Random proxy per connection | off |
 | `--ssl-no-verify` | Skip TLS certificate validation | off |
-| `--backend` | Choose runtime backend: `python` or `rust` | python |
+| `--backend` | Runtime backend: `auto` (use Rust when installed + compatible, else Python) \| `python` \| `rust` | `auto` |
 | `--allow-public-targets` | Permit public internet targets (explicit authorization required) | off |
 | `--allowlist-file` | File of allowed hostnames / IPs; entries are always permitted | none |
 | `--json` | Newline-delimited JSON stats | off |
@@ -234,7 +295,7 @@ Emits one newline-delimited JSON object per interval:
        ▼                                 ▼
 ┌─────────────┐                   ┌─────────────┐
 │   Profiles  │                   │  ProxyPool  │
-│ (15 modes)  │                   │ (rotation)  │
+│ (32 modes)  │                   │ (rotation)  │
 └──────┬──────┘                   └──────┬──────┘
        │                                 │
        ▼                                 ▼
@@ -257,7 +318,9 @@ Emits one newline-delimited JSON object per interval:
 - `cli.py` - Argument parsing, orchestration, signal handling
 - `config.py` - Configuration dataclass with validation + layered TOML/env settings
 - `engine.py` - Async attack engine with worker pool
-- `profiles.py` - Fourteen TCP attack profiles (7 classic slow modes + 7 protocol-specific modes); plus `udp` = 15 modes total
+- `profiles.py` - Thirty-one TCP attack profiles (7 classic slow modes + 7 protocol-specific modes + 6 protocol-starvation modes + 5 HTTP-parser/framing modes + 4 HTTP/2 framing/HPACK modes + 2 TLS-handshake starvation modes); plus `udp` = 32 modes total
+- `h2.py` - Dependency-free HTTP/2 frame + HPACK builders for the Tier-3 modes
+- `tls.py` - Dependency-free TLS record + ClientHello builders for the Tier-4 handshake-starvation modes
 - `udp.py` - UDP datagram flood mode
 - `conn.py` - Connection factory (plain, TLS, SOCKS5, SOCKS4a, HTTP CONNECT)
 - `proxies.py` - Proxy parsing and rotation
@@ -354,6 +417,18 @@ The test suite includes:
 For more troubleshooting information, see [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Development
+
+The root `Makefile` wraps every common workflow (`make` lists them):
+
+```bash
+make dev      # editable install with pytest, mypy and ruff
+make test     # pytest with the coverage gate
+make lint     # ruff check + format --check
+make type     # mypy
+make check    # all Python + Rust gates (what CI runs)
+```
+
+Or do it manually:
 
 ```bash
 # Install development dependencies

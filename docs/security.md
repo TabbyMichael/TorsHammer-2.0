@@ -44,7 +44,7 @@ Torshammer 2.0 tests server resilience to resource-exhaustion attacks by:
 
 ### Attack Vectors
 
-The tool implements fifteen attack vectors, in three families:
+The tool implements thirty-two attack vectors, in seven families:
 
 **Classic TCP slow-request modes (HTTP/HTTPS):**
 
@@ -69,6 +69,35 @@ The tool implements fifteen attack vectors, in three families:
 13. **JSON-RPC slow** - Dribbles a JSON-RPC payload that is never completed
 14. **SMTP slow envelope** - Drips SMTP envelope commands, never sends `DATA`
 15. **FTP slow command** - Drips FTP commands, never completes a data transfer
+
+**Protocol-starvation modes:**
+
+16. **IMAP slow literal** - Announces an IMAP `{N}` literal and never delivers N bytes
+17. **Redis RESP slow** - Declares an oversized RESP `$len` bulk that is never closed
+18. **Postgres startup slow** - Over-promises a StartupMessage length, withholds the terminator
+19. **DNS TCP slow** - Announces a large DNS-over-TCP message and never completes it
+20. **NNTP slow post** - Starts an NNTP article and never sends the dot-terminator
+21. **Idle hold** - Opens a connection and sends zero bytes, pinning idle slots
+
+**HTTP-parser / framing-abuse modes:**
+
+22. **Slow XML** - Over-promises `Content-Length` and streams an unclosed XML/`DOCTYPE` prolog, keeping the XML parser buffering
+23. **Slow form parse** - Declares a huge urlencoded body and trickles endless `key=value&` pairs the decoder never finishes
+24. **Header count flood** - Emits ~2000 tiny headers then completes the request, stressing per-header bookkeeping that caps size but not count
+25. **WebSocket slow frame** - Completes the upgrade, then streams a frame whose declared payload length is never satisfied
+26. **Request smuggling probe** - Sends an ambiguous `Content-Length` + `Transfer-Encoding: chunked` CL.TE request; a *detection probe* for authorized testing, not an exploit payload
+
+**HTTP/2 framing / HPACK-abuse modes:**
+
+27. **HTTP/2 rapid reset** - Opens many streams on one HTTP/2 connection and `RST_STREAM` each immediately (CVE-2023-44487 class), forcing per-stream alloc/teardown at near-zero bandwidth
+28. **HTTP/2 slow streams** - Opens many half-open streams (no `END_STREAM`) and dribbles a byte of `DATA` forever, pinning per-stream flow-control/buffer state
+29. **HTTP/2 continuation flood** - Keeps a header block open with an unbounded run of `CONTINUATION` frames that never set `END_HEADERS`, growing frame-reassembly state
+30. **HTTP/2 HPACK drip** - Feeds one valid HPACK block a single octet per frame with random delays, the HTTP/2 analogue of a slowloris header drip
+
+**TLS-handshake starvation modes:**
+
+31. **TLS slow hello** - Announces a handshake record declaring the max record length, opens a `ClientHello` inside it, then dribbles a few bytes and never completes the record, pinning the server's handshake reassembly buffer
+32. **TLS renegotiation hold** - Repeatedly emits a fresh partial `ClientHello` record to churn (re)handshake initiation without ever completing one, re-pinning handshake/renegotiation state on a single connection
 
 **See:** [Attack Modes Documentation](attack-modes.md) for detailed explanations.
 
@@ -459,7 +488,7 @@ Legacy versions (1.x) are not supported.
 
 If you discover a security vulnerability in Torshammer 2.0, please report it responsibly.
 
-**Note:** This project does not currently have a designated security contact. Please report vulnerabilities via the Forgejo instance's issue tracker or contact the maintainers directly.
+**Note:** This project does not currently have a designated security contact. Please report vulnerabilities via the GitHub issue tracker or contact the maintainers directly.
 
 #### What to Report
 

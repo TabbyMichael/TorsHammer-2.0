@@ -62,10 +62,11 @@ def test_parse_http_url_with_custom_port():
     assert cfg.header_host == "example.com:8080"
 
 
-def test_backend_flag_defaults_to_python():
+def test_backend_flag_defaults_to_auto():
+    """The launcher defaults to 'auto'; the concrete engine is chosen in main()."""
     args = build_parser().parse_args(["--url", "http://localhost", "--allow-public-targets"])
     cfg = _resolve_config(args)
-    assert cfg.backend == "python"
+    assert cfg.backend == "auto"
 
 
 def test_backend_flag_rust_falls_back_when_binary_missing(monkeypatch: pytest.MonkeyPatch):
@@ -216,18 +217,20 @@ def test_every_registered_mode_is_accepted_by_the_cli():
 
 
 def test_rust_cli_mode_list_matches_python_registry():
-    """The Rust CLI's ``MODES`` array must mirror the Python registry.
+    """The Rust engine's ``TCP_MODES`` dispatch table must mirror the Python
+    registry (plus ``udp``).
 
-    Both backends are documented as supporting the same fifteen modes, so the
-    Rust mode list is parsed straight out of ``rust/src/main.rs`` and compared
-    with ``sorted(PROFILES) + ["udp"]``.
+    The dispatch table is now the single source of truth for the Rust backend,
+    so it is parsed straight out of ``rust/src/engine/profiles.rs`` and compared
+    with ``sorted(PROFILES) + ["udp"]``. The CLI list, ``--help`` and argument
+    validation all derive from this same table.
     """
-    source = (Path(__file__).resolve().parents[1] / "rust" / "src" / "main.rs").read_text(
-        encoding="utf-8"
-    )
-    match = re.search(r"pub const MODES: \[&str; \d+\] = \[(.*?)\];", source, re.DOTALL)
-    assert match is not None, "MODES array not found in rust/src/main.rs"
-    rust_modes = re.findall(r'"([^"]+)"', match.group(1))
+    source = (
+        Path(__file__).resolve().parents[1] / "rust" / "src" / "engine" / "profiles.rs"
+    ).read_text(encoding="utf-8")
+    start = source.index("TCP_MODES: &[(&str, Handler)] = &[")
+    end = source.index("];", start)
+    rust_modes = re.findall(r'\(\s*"([^"]+)"\s*,', source[start:end]) + ["udp"]
     assert len(rust_modes) == len(set(rust_modes)), "duplicate Rust mode entry"
     assert sorted(rust_modes) == sorted(list(PROFILES) + ["udp"])
 
@@ -278,5 +281,3 @@ def test_github_soak_workflow_exists_and_validates():
     assert soak_path.exists(), "soak.yml missing from .github/workflows"
     content = soak_path.read_text(encoding="utf-8")
     assert "scripts/soak.py" in content
-
-

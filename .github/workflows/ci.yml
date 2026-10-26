@@ -1,8 +1,7 @@
 name: CI
 
-# Canonical merge gate for the GitHub remote (origin). Mirrors
-# .forgejo/workflows/test.yml so pushes/PRs get the same verdict whether the
-# code is reviewed here or on the self-hosted Forgejo instance.
+# Canonical merge gate for the GitHub remote (origin). Runs the dual-backend
+# gates (Python + Rust) plus a Woodpecker parity check on every push/PR.
 
 on:
   push:
@@ -89,7 +88,7 @@ jobs:
         python -m pip install pyyaml
         python - <<'PY'
         import pathlib, yaml
-        files = [".woodpecker.yml", *sorted(str(p) for p in pathlib.Path(".forgejo/workflows").glob("*.yml")), *sorted(str(p) for p in pathlib.Path(".github/workflows").glob("*.yml"))]
+        files = [".woodpecker.yml", *sorted(str(p) for p in pathlib.Path(".github/workflows").glob("*.yml"))]
         for f in files:
             yaml.safe_load(pathlib.Path(f).read_text())
             print(f"OK {f}")

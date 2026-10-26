@@ -25,9 +25,59 @@ config = Config(
 )
 ```
 
-### No Environment Variables
+### Layered Settings & Environment Variables
 
-Torshammer 2.0 does **not** use environment variables for configuration. All settings must be specified via CLI arguments or programmatic construction.
+Torshammer 2.0 resolves every scalar/flag setting through a fixed precedence
+chain (implemented in `src/torshammer/config.py::apply_layered_settings`):
+
+```
+explicit CLI flag  >  TORSHAMMER_* environment variable  >  TOML file  >  argparse default
+```
+
+The TOML file is auto-discovered as `torshammer.toml`, or the
+`[tool.torshammer]` table inside `pyproject.toml` (stdlib `tomllib`, zero
+runtime dependencies).
+
+For each mapped setting the environment variable is `TORSHAMMER_<UPPER_NAME>`
+(hyphens/underscores preserved, name upper-cased). Booleans are enabled with
+`1`/`true`/`yes`/`on`.
+
+| CLI flag | Env var | TOML key |
+|----------|---------|----------|
+| `--concurrency` | `TORSHAMMER_CONCURRENCY` | `concurrency` |
+| `--mode` | `TORSHAMMER_MODE` | `mode` |
+| `--delay-min` | `TORSHAMMER_DELAY_MIN` | `delay_min` |
+| `--delay-max` | `TORSHAMMER_DELAY_MAX` | `delay_max` |
+| `--duration` | `TORSHAMMER_DURATION` | `duration` |
+| `--connect-timeout` | `TORSHAMMER_CONNECT_TIMEOUT` | `connect_timeout` |
+| `--post-length` | `TORSHAMMER_POST_LENGTH` | `post_length` |
+| `--stats-interval` | `TORSHAMMER_STATS_INTERVAL` | `stats_interval` |
+| `--max-errors` | `TORSHAMMER_MAX_ERRORS` | `max_errors` |
+| `--ramp-up` | `TORSHAMMER_RAMP_UP` | `ramp_up` |
+| `--fail-under` | `TORSHAMMER_FAIL_UNDER` | `fail_under` |
+| `--ssl-no-verify` | `TORSHAMMER_SSL_NO_VERIFY` | `ssl_no_verify` |
+| `--no-random-path` | `TORSHAMMER_NO_RANDOM_PATH` | `no_random_path` |
+| `--rotate-proxies` | `TORSHAMMER_ROTATE_PROXIES` | `rotate_proxies` |
+| `--json` | `TORSHAMMER_JSON_OUTPUT` | `json_output` |
+| `--quiet` | `TORSHAMMER_QUIET` | `quiet` |
+| `--fail-on-zero` | `TORSHAMMER_FAIL_ON_ZERO` | `fail_on_zero` |
+| `--allow-public-targets` | `TORSHAMMER_ALLOW_PUBLIC_TARGETS` | `allow_public_targets` |
+
+Two standalone environment variables are also honored:
+
+- `TORSHAMMER_RUST_BIN` — path to the `torshammer-rust` executable used by the
+  `--backend rust` dispatcher (otherwise it searches `PATH` and
+  `rust/target/{release,debug}`).
+- `TORSHAMMER_CLUSTER_SECRET` — shared secret for the master/worker cluster
+  when `--cluster-secret` is not passed explicitly.
+
+```bash
+# Equivalent to --concurrency 512 --mode slow-read --duration 120
+export TORSHAMMER_CONCURRENCY=512
+export TORSHAMMER_MODE=slow-read
+export TORSHAMMER_DURATION=120
+torshammer -u http://localhost:8080
+```
 
 ## Config Dataclass
 
@@ -441,10 +491,15 @@ The configuration is validated during construction in the CLI:
 - **Hostname:** Required for URL-based targets
 - **Port:** Must be valid integer (1-65535)
 - **Concurrency:** Minimum 1 (enforced)
-- **Mode:** Must be one of:
-  `slow-post`, `slow-post-headers`, `slow-headers`, `slow-read`, `chunked`, `websocket-slow-upgrade`,
-  `http-pipelining`, `range-abuse`, `cookie-bomb`, `jsonrpc-slow`, `smtp-slow-envelope`,
-  `ftp-slow-command`, `udp`
+- **Mode:** Must be one of the 32 modes:
+  `slow-post`, `slow-post-headers`, `slow-headers`, `slow-read`, `chunked`,
+  `multipart-slow-upload`, `expect-continue-abuse`, `websocket-slow-upgrade`,
+  `http-pipelining`, `range-abuse`, `cookie-bomb`, `jsonrpc-slow`,
+  `smtp-slow-envelope`, `ftp-slow-command`, `imap-slow-literal`, `redis-resp-slow`,
+  `postgres-startup-slow`, `dns-tcp-slow`, `nntp-slow-post`, `idle-hold`,
+  `slow-xml`, `slow-form-parse`, `header-count-flood`, `websocket-slow-frame`,
+  `req-smuggling-probe`, `h2-rapid-reset`, `h2-slow-streams`, `h2-continuation-flood`,
+  `h2-hpack-drip`, `tls-slow-hello`, `tls-renego-hold`, `udp`
 - **Proxy scheme:** Must be one of: `socks5`, `socks4`, `http`
 
 ## Security Considerations
@@ -481,15 +536,22 @@ config = Config(
 - Use proper certificate authorities in production
 - Self-signed certificates should be added to system trust store
 
-### No Environment Variables
+### Environment Variables & Secrets
 
-Torshammer does not use environment variables for configuration. This prevents:
+Torshammer does read `TORSHAMMER_*` environment variables for ordinary
+(settings) configuration — see
+[Layered Settings & Environment Variables](#layered-settings--environment-variables).
+However, **secrets are deliberately never taken from configuration**:
 
-- Accidental credential exposure via process environment
-- Configuration drift between environments
-- Secret leakage in process listings
+- Proxy credentials are supplied inline in the proxy URL (or via `--proxy-env`,
+  which points at an environment variable holding the *full proxy URL*) and are
+  held in memory only — they are never written to a TOML file or the general
+  `TORSHAMMER_*` config layer.
+- The cluster secret (`--cluster-secret` / `TORSHAMMER_CLUSTER_SECRET`) is used
+  at runtime for authentication and is not logged or persisted.
 
-All configuration must be explicitly provided via CLI or programmatic construction.
+This separation keeps tunable settings ergonomic (env/TOML) while limiting
+credential exposure via process environments and listings.
 
 ## Configuration Best Practices
 

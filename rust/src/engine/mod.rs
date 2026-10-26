@@ -6,17 +6,19 @@
 //! SplitMix64 PRNG supplies per-connection randomization and atomic counters
 //! keep the live reporter cheap.
 
+pub mod h2;
 pub mod profiles;
 pub mod rng;
 pub mod signals;
 pub mod stats;
+pub mod tls;
 pub mod udp;
 pub mod url;
 
 use crate::engine::rng::Rng;
-use crate::engine::stats::{human_size, Stats};
+use crate::engine::stats::{Snapshot, Stats};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -51,10 +53,29 @@ pub struct EngineConfig {
     pub fail_on_zero: bool,
 }
 
+/// A hook the presentation layer implements to render live progress and a
+/// final summary. The engine stays free of any formatting/IO decisions and
+/// simply hands it immutable [`Snapshot`] values.
+pub trait Monitor {
+    /// Called once per stats interval while the attack runs.
+    fn tick(&mut self, snap: &Snapshot, uptime: f64, sent_rate: f64, recv_rate: f64);
+    /// Called once after all workers have stopped.
+    fn finish(&mut self, snap: &Snapshot, uptime: f64);
+}
+
+/// A [`Monitor`] that renders nothing — used for JSON and unit-test runs.
+#[allow(dead_code)]
+pub struct SilentMonitor;
+
+impl Monitor for SilentMonitor {
+    fn tick(&mut self, _snap: &Snapshot, _uptime: f64, _sent_rate: f64, _recv_rate: f64) {}
+    fn finish(&mut self, _snap: &Snapshot, _uptime: f64) {}
+}
+
 /// Run the attack until the duration elapses or Ctrl-C is pressed.
 ///
 /// Returns the process exit code (0 = success, 1 = automation failure).
-pub fn run(config: EngineConfig) -> i32 {
+pub fn run(config: EngineConfig, monitor: &mut dyn Monitor) -> i32 {
     signals::install();
 
     let concurrency = config.concurrency.max(1);
@@ -122,7 +143,7 @@ pub fn run(config: EngineConfig) -> i32 {
         if cfg.json {
             report_json(&stats, uptime, sent_rate, recv_rate);
         } else if !cfg.quiet {
-            report_live(&stats, uptime, sent_rate, recv_rate);
+            monitor.tick(&stats.snapshot(), uptime, sent_rate, recv_rate);
         }
     }
 
@@ -135,10 +156,7 @@ pub fn run(config: EngineConfig) -> i32 {
     if cfg.json {
         report_json(&stats, uptime, 0.0, 0.0);
     } else {
-        if !cfg.quiet {
-            println!();
-        }
-        report_summary(&stats, uptime);
+        monitor.finish(&stats.snapshot(), uptime);
     }
 
     // Automation exit codes (mirrors the Python CLI).
@@ -241,13 +259,29 @@ fn worker(
     }
 }
 
+/// Process-wide round-robin cursor so concurrent workers spread across every
+/// resolved address instead of all pinning the first A record (mirrors the
+/// Python `_ADDR_CURSOR` DNS load-balancing).
+static ADDR_CURSOR: AtomicUsize = AtomicUsize::new(0);
+
 fn open_connection(cfg: &EngineConfig) -> std::io::Result<TcpStream> {
+    let addrs: Vec<_> = (cfg.host.as_str(), cfg.port).to_socket_addrs()?.collect();
+    if addrs.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no address resolved",
+        ));
+    }
+    // Rotate the starting address so parallel connections distribute across all
+    // A/AAAA records, then walk the remainder in order as failover candidates.
+    let start = ADDR_CURSOR.fetch_add(1, Ordering::Relaxed) % addrs.len();
+    // Allow sub-second connect timeouts (parity with Python) while keeping a
+    // small floor so a misconfigured 0.0 never turns into a busy-spin.
+    let timeout = Duration::from_secs_f64(cfg.connect_timeout.max(0.05));
     let mut last_error: Option<std::io::Error> = None;
-    for addr in (cfg.host.as_str(), cfg.port).to_socket_addrs()? {
-        match TcpStream::connect_timeout(
-            &addr,
-            Duration::from_secs_f64(cfg.connect_timeout.max(1.0)),
-        ) {
+    for offset in 0..addrs.len() {
+        let addr = addrs[(start + offset) % addrs.len()];
+        match TcpStream::connect_timeout(&addr, timeout) {
             Ok(stream) => {
                 let _ = stream.set_nodelay(true);
                 let _ = stream.set_write_timeout(Some(Duration::from_secs_f64(
@@ -273,31 +307,35 @@ pub(crate) fn sleep_slices(running: &AtomicBool, seconds: f64) {
     }
 }
 
-fn report_live(stats: &Stats, uptime: f64, sent_rate: f64, recv_rate: f64) {
-    use std::io::Write;
-    let mins = (uptime as u64) / 60;
-    let secs = (uptime as u64) % 60;
-    let line = format!(
-        "\rthm | conns={} open={} done={} err={} | sent {} @{}/s | recv {} @{}/s | {mins}:{secs:02}",
-        stats.connections(),
-        stats.active(),
-        stats.completed(),
-        stats.errors(),
-        human_size(stats.bytes_sent() as f64),
-        human_size(sent_rate),
-        human_size(stats.bytes_received() as f64),
-        human_size(recv_rate),
-    );
-    print!("{line:<130}");
-    let _ = std::io::stdout().flush();
+fn json_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn report_json(stats: &Stats, uptime: f64, sent_rate: f64, recv_rate: f64) {
     // Mirrors the Python engine's JSON payload and stream: newline-delimited
     // JSON goes to stdout so `torshammer ... --json | jq` works, while every
     // human-readable line (banner, status, summary) is routed to stderr.
+    let snap = stats.snapshot();
+    let (verdict, reason) = stats::classify_verdict(&snap);
     println!(
-        r#"{{"connections":{},"active":{},"peak_active":{},"completed":{},"errors":{},"bytes_sent":{},"bytes_received":{},"sent_bytes_per_sec":{:.1},"recv_bytes_per_sec":{:.1},"uptime":{:.1}}}"#,
+        concat!(
+            r#"{{"connections":{},"active":{},"peak_active":{},"completed":{},"errors":{}"#,
+            r#","bytes_sent":{},"bytes_received":{},"sent_bytes_per_sec":{:.1},"#,
+            r#""recv_bytes_per_sec":{:.1},"uptime":{:.1},"responses":{},"status_5xx":{},"#,
+            r#""mean_response_latency":{:.3},"verdict":"{}","verdict_reason":"{}"}}"#
+        ),
         stats.connections(),
         stats.active(),
         stats.peak_active(),
@@ -308,25 +346,12 @@ fn report_json(stats: &Stats, uptime: f64, sent_rate: f64, recv_rate: f64) {
         sent_rate,
         recv_rate,
         uptime,
+        stats.responses(),
+        stats.status_5xx(),
+        stats.mean_response_latency(),
+        json_escape(&verdict),
+        json_escape(&reason),
     );
-}
-
-fn report_summary(stats: &Stats, uptime: f64) {
-    let mins = (uptime as u64) / 60;
-    let secs = (uptime as u64) % 60;
-    println!("  connections opened : {}", stats.connections());
-    println!("  peak concurrent    : {}", stats.peak_active());
-    println!("  completed cycles   : {}", stats.completed());
-    println!("  errors             : {}", stats.errors());
-    println!(
-        "  bytes sent         : {}",
-        human_size(stats.bytes_sent() as f64)
-    );
-    println!(
-        "  bytes received     : {}",
-        human_size(stats.bytes_received() as f64)
-    );
-    println!("  elapsed            : {mins}:{secs:02}");
 }
 
 #[cfg(test)]
@@ -388,7 +413,7 @@ mod tests {
             accepted
         });
 
-        let code = run(test_config(addr.port()));
+        let code = run(test_config(addr.port()), &mut SilentMonitor);
         stop_accepting.store(true, Ordering::Relaxed);
         let accepted = acceptor.join().unwrap();
 
@@ -432,7 +457,7 @@ mod tests {
             (datagrams, bytes)
         });
 
-        let code = run(udp_config(port));
+        let code = run(udp_config(port), &mut SilentMonitor);
         stop.store(true, Ordering::Relaxed);
         let (datagrams, bytes) = collector.join().unwrap();
 

@@ -140,6 +140,7 @@ class AttackEngine:
             finally:
                 if writer is not None:
                     try:
+                        conn.set_linger_off(writer)
                         writer.close()
                         await writer.wait_closed()
                     except OSError:
@@ -233,6 +234,9 @@ class AttackEngine:
                     "sent_bytes_per_sec": round(sent_rate, 1),
                     "recv_bytes_per_sec": round(recv_rate, 1),
                     "uptime": round(uptime, 1),
+                    "responses": stats.responses,
+                    "status_5xx": stats.status_5xx,
+                    "mean_response_latency": round(stats.mean_response_latency, 3),
                 }
                 # Advisory-only verdict: informational signal for operators,
                 # never drives exit codes (see classify_verdict limits).

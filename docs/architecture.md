@@ -140,7 +140,7 @@ see `docs/security.md` for the DNS-rebinding (TOCTOU) limitation.
 ### `profiles.py` - Attack Profiles
 
 **Responsibilities:**
-- Implements fourteen TCP attack vectors (fifteen including the `udp` mode in `udp.py`)
+- Implements thirty-one TCP attack vectors (thirty-two including the `udp` mode in `udp.py`); the four HTTP/2 modes emit real frames via the dependency-free `h2.py` builder and the two TLS-handshake starvation modes emit real records via the dependency-free `tls.py` builder
 - Randomizes request characteristics
 - Manages slow data transmission
 - Evades simple fingerprinting

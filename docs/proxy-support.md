@@ -359,7 +359,7 @@ curl --proxy socks5://127.0.0.1:9050 http://example.com
 **Error:** `ProxyConnectError: SOCKS5 connect failed (reply 5)`
 
 **Causes:**
-- Proxy拒绝连接 (SOCKS5 reply 5)
+- Proxy rejected the connection (SOCKS5 reply 5 — general server failure)
 - Target blocked by proxy
 - Proxy ACL restrictions
 

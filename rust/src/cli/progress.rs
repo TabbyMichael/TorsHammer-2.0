@@ -64,11 +64,12 @@ impl Symbols {
 /// The lifecycle state of a single task/step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StepStatus {
+    /// Reserved for a queued step that has not started yet; the live reporter
+    /// begins at [`StepStatus::Running`].
+    #[allow(dead_code)]
     Pending,
     Running,
     Done,
-    /// Reserved for failure lifecycle states; not produced by the scaffold.
-    #[allow(dead_code)]
     Failed,
 }
 
@@ -119,6 +120,10 @@ impl Spinner {
     }
 
     /// The ordinary `[OK]`/`[ERR]` completion glyph.
+    ///
+    /// Reserved building block for callers that finish a [`Spinner`] in place;
+    /// the live reporter uses [`Symbols`] directly instead.
+    #[allow(dead_code)]
     pub fn done_symbol(&self) -> &'static str {
         if self.unicode {
             "\u{2713}"
@@ -143,6 +148,9 @@ impl Elapsed {
     }
 
     /// Seconds elapsed since start, exposed for tests and reports.
+    ///
+    /// Reserved accessor; the reporter renders via [`Elapsed::as_display`].
+    #[allow(dead_code)]
     pub fn as_secs(&self) -> u64 {
         self.started.elapsed().as_secs()
     }

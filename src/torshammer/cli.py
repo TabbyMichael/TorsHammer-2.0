@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import signal
 import sys
 from importlib import resources
@@ -26,7 +27,6 @@ HAS_RESOURCE = resource is not None and hasattr(resource, "RLIMIT_NOFILE")
 from . import __version__
 from .config import Config
 from .engine import AttackEngine
-from .profiles import PROFILES
 
 
 def _load_banner() -> str:
@@ -69,14 +69,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     target.add_argument(
         "--backend",
-        choices=["python", "rust"],
-        default="python",
+        choices=["auto", "python", "rust"],
+        default="auto",
         help=(
-            "Select the runtime backend. 'python' is the reference asyncio engine "
-            "(full flag support). 'rust' execs the high-performance backend and "
-            "only supports the mapped flags; incompatible flags "
-            "(proxies/Tor, TLS verify bypass, HTTPS targets) exit non-zero "
-            "instead of being silently ignored."
+            "Select the runtime backend. 'auto' (default) uses the Rust engine only "
+            "when it is installed on PATH/TORSHAMMER_RUST_BIN and the run is fully "
+            "Rust-compatible; otherwise it uses the Python reference engine. "
+            "'python' is the asyncio engine (full flag support). 'rust' always execs "
+            "the high-performance backend and fails closed on flags it cannot honor "
+            "(proxies/Tor, TLS verify bypass, HTTPS targets) instead of silently "
+            "downgrading. A repository-local 'cargo build' is used only with an "
+            "explicit --backend rust."
         ),
     )
     target.add_argument(
@@ -91,7 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     attack = parser.add_argument_group("attack")
-    attack.add_argument("-m", "--mode", choices=sorted(PROFILES) + ["udp"], default="slow-post")
+    attack.add_argument("-m", "--mode", choices=all_modes(), default="slow-post")
     attack.add_argument(
         "--method",
         metavar="VERB",
@@ -213,6 +216,35 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Resolve and print the target/config without opening any connections",
     )
+
+    cluster = parser.add_argument_group("distributed (master/worker)")
+    cluster.add_argument(
+        "--worker",
+        action="store_true",
+        help="Run as a cluster worker: listen for master JSON-RPC commands and "
+        "launch attacks on request instead of attacking directly.",
+    )
+    cluster.add_argument(
+        "--cluster-bind",
+        metavar="HOST:PORT",
+        default="127.0.0.1:9999",
+        help="Address the worker RPC server binds to (keep it on loopback unless firewalled).",
+    )
+    cluster.add_argument(
+        "--cluster-secret",
+        metavar="SECRET",
+        help="Shared secret the worker requires (or set TORSHAMMER_CLUSTER_SECRET).",
+    )
+    cluster.add_argument(
+        "--master",
+        action="store_true",
+        help="Act as master: distribute the resolved attack to workers in --cluster-workers.",
+    )
+    cluster.add_argument(
+        "--cluster-workers",
+        metavar="FILE",
+        help="File listing worker RPC endpoints, one 'host:port' per line (used with --master).",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -234,19 +266,32 @@ __all__ = [
     "_parse_custom_headers",
     "_print_dry_run",
     "_print_summary",
+    "_resolve_auto_backend",
     "_resolve_backend",
     "_resolve_config",
+    "_rust_blockers",
     "build_parser",
+    "load_workers_file",
     "main",
+    "run_master",
+    "run_worker",
 ]
 
-from .dispatch import _find_rust_binary, _forward_to_rust, _resolve_backend
+from .cluster import load_workers_file, run_master, run_worker
+from .dispatch import (
+    _find_rust_binary,
+    _forward_to_rust,
+    _resolve_auto_backend,
+    _resolve_backend,
+    _rust_blockers,
+)
 from .settings import (
     _build_custom_headers,
     _build_proxies,
     _load_custom_body,
     _parse_custom_headers,
     _resolve_config,
+    all_modes,
 )
 from .summary import _print_dry_run, _print_summary
 from .target import (
@@ -254,6 +299,10 @@ from .target import (
     _is_private_or_local_target,
     _load_allowlist,
 )
+
+
+def _cluster_secret(args: argparse.Namespace) -> str:
+    return getattr(args, "cluster_secret", "") or os.environ.get("TORSHAMMER_CLUSTER_SECRET", "")
 
 
 async def _run(config: Config) -> AttackEngine:
@@ -274,15 +323,41 @@ async def _run(config: Config) -> AttackEngine:
 
 
 def _check_fd_limits(concurrency: int) -> None:
-    """Check file descriptor limits and warn if concurrency might exceed them."""
+    """Best-effort raise the fd soft limit, then warn if it is still too low.
+
+    Slow-request modes hold one socket per connection for the whole run, so a
+    low ``RLIMIT_NOFILE`` soft cap silently throttles ``-c``. We try to lift the
+    soft limit toward the hard limit automatically (no ``ulimit`` dance needed),
+    then only warn if even the raised limit cannot cover the requested
+    concurrency with headroom.
+    """
     if not HAS_RESOURCE or resource is None:
         return  # Windows or systems without resource module
 
     try:
         soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
-        # Use 80% of soft limit as safe threshold
-        safe_limit = int(soft_limit * 0.8)
 
+        # Aim a little above the requested concurrency for std/listener fds.
+        desired = concurrency + 64
+        if soft_limit < desired:
+            if hard_limit == resource.RLIM_INFINITY:
+                target = desired
+            else:
+                target = min(hard_limit, desired)
+            if target > soft_limit:
+                try:
+                    resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard_limit))
+                    soft_limit = target
+                    print(
+                        f"[info] raised file-descriptor soft limit to {target}.",
+                        file=sys.stderr,
+                    )
+                except (ValueError, OSError):
+                    # Hard limit is often root-only; fall through to the warning.
+                    pass
+
+        # Use 80% of the (possibly raised) soft limit as the safe threshold.
+        safe_limit = int(soft_limit * 0.8)
         if concurrency > safe_limit:
             print(
                 f"[warn] Requested concurrency ({concurrency}) exceeds 80% of "
@@ -291,12 +366,35 @@ def _check_fd_limits(concurrency: int) -> None:
             )
             print("[warn] This may cause 'Too many open files' errors.", file=sys.stderr)
             print(
-                f"[warn] Consider: 'ulimit -n {hard_limit}' to increase the limit.", file=sys.stderr
+                f"[warn] Consider: 'ulimit -n {hard_limit}' to increase the "
+                "hard limit (may need root).",
+                file=sys.stderr,
             )
             print(f"[warn] Or reduce concurrency with -c {safe_limit}", file=sys.stderr)
     except (ValueError, OSError):
         # getrlimit can fail on some systems, just skip the check
         pass
+
+
+def _print_no_target(parser: argparse.ArgumentParser) -> None:
+    """Print a copy-pasteable quickstart when invoked without any target.
+
+    The most common first-time mistake is running the tool bare; a short, valid
+    example is far more useful than a bare argparse usage dump.
+    """
+    print(parser.format_usage().rstrip(), file=sys.stderr)
+    print(
+        "torshammer: no target given.\n"
+        "\n"
+        "Point it at a system you own or are authorized to test:\n"
+        "  torshammer -u http://localhost:8080                   # slow-post, 256 conns\n"
+        "  torshammer -u http://localhost:8080 -m slow-headers   # slowloris\n"
+        "  torshammer -u http://localhost:8080 --dry-run         # preview, opens nothing\n"
+        "\n"
+        "Public hosts need an explicit --allow-public-targets (or --allowlist-file).\n"
+        "Run 'torshammer --help' for every option and all 32 modes.\n",
+        file=sys.stderr,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -318,6 +416,18 @@ def main(argv: list[str] | None = None) -> int:
         apply_layered_settings(args, load_toml_file(cfg_file), cli_defaults)
     else:
         apply_layered_settings(args, {}, cli_defaults)
+
+    # A bare invocation (no target) prints a quickstart instead of erroring out
+    # cryptically. The worker serves RPC commands and needs no target of its own.
+    if not getattr(args, "worker", False) and not (args.url or args.target or args.host):
+        _print_no_target(parser)
+        return 2
+
+    # Worker mode serves JSON-RPC commands and launches attacks on demand; it
+    # needs no target of its own, so it is handled before config resolution.
+    if getattr(args, "worker", False):
+        return asyncio.run(run_worker(args.cluster_bind, _cluster_secret(args)))
+
     try:
         config = _resolve_config(args)
     except ValueError as exc:
@@ -326,11 +436,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: invalid option: {exc}", file=sys.stderr)
         return 2
 
+    # Resolve 'auto' to a concrete engine now that the full Config (and so the
+    # feature set actually in use) is known. This precedes dry-run/master/rust
+    # dispatch so those paths always see a concrete 'python' or 'rust'.
+    if config.backend == "auto":
+        config.backend = _resolve_auto_backend(config, args)
+
     if getattr(args, "dry_run", False):
         if config.backend == "rust":
             print("dry-run: rust backend selected; no dispatch performed", file=sys.stderr)
         _print_dry_run(config)
         return 0
+
+    # Master mode distributes the resolved attack to worker RPC endpoints.
+    if getattr(args, "master", False):
+        workers_file = getattr(args, "cluster_workers", None)
+        if not workers_file:
+            print("error: --master requires --cluster-workers FILE", file=sys.stderr)
+            return 2
+        try:
+            workers = load_workers_file(workers_file)
+        except OSError as exc:
+            print(f"error: cannot read --cluster-workers file: {exc}", file=sys.stderr)
+            return 2
+        if not workers:
+            print("error: --cluster-workers file lists no workers", file=sys.stderr)
+            return 2
+        return asyncio.run(run_master(config, workers, _cluster_secret(args)))
 
     # Dispatch to the Rust backend before any Python engine work: on POSIX this
     # replaces the process image; on Windows it spawns and mirrors the code.

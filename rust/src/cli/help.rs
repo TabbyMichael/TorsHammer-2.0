@@ -8,7 +8,10 @@
 use crate::cli::theme::Theme;
 
 /// Render the full help page.
-pub fn render(program: &str, version: &str, theme: &Theme, color: bool) -> String {
+///
+/// `modes` is the canonical attack-mode list (from the engine registry) so the
+/// help text can never drift from the modes that actually exist.
+pub fn render(program: &str, version: &str, theme: &Theme, color: bool, modes: &[&str]) -> String {
     let mut out = String::new();
     let header = format!(
         "{program} v{version} \u{2014} Security Testing & Vulnerability Assessment Framework"
@@ -37,26 +40,68 @@ pub fn render(program: &str, version: &str, theme: &Theme, color: bool) -> Strin
             "--backend <NAME>",
             "Runtime backend: python | rust [default: rust]",
         ),
-        ("-c, --concurrency <N>", "Concurrent connections [default: 256]"),
+        (
+            "-c, --concurrency <N>",
+            "Concurrent connections [default: 256]",
+        ),
         (
             "-m, --mode <NAME>",
-            "Attack profile: slow-post | slow-post-headers | slow-headers | slow-read | chunked | multipart-slow-upload | expect-continue-abuse | websocket-slow-upgrade | http-pipelining | range-abuse | cookie-bomb | jsonrpc-slow | smtp-slow-envelope | ftp-slow-command | udp",
+            &format!("Attack profile: {}", modes.join(" | ")),
         ),
-        ("-d, --duration <SECS>", "Attack duration in seconds (0 = unlimited)"),
-        ("--delay-min <SECS>", "Minimum byte-dribble delay [default: 0.1]"),
-        ("--delay-max <SECS>", "Maximum byte-dribble delay [default: 3.0]"),
-        ("--connect-timeout <SECS>", "Connection timeout [default: 15]"),
-        ("--post-length <N>", "Baseline slow-post content length [default: 4096]"),
-        ("--method <VERB>", "Override the HTTP method (GET, POST, PUT, ...)"),
-        ("--path <PATH>", "Override the request path [default: from target]"),
+        (
+            "-d, --duration <SECS>",
+            "Attack duration in seconds (0 = unlimited)",
+        ),
+        (
+            "--delay-min <SECS>",
+            "Minimum byte-dribble delay [default: 0.1]",
+        ),
+        (
+            "--delay-max <SECS>",
+            "Maximum byte-dribble delay [default: 3.0]",
+        ),
+        (
+            "--connect-timeout <SECS>",
+            "Connection timeout [default: 15]",
+        ),
+        (
+            "--post-length <N>",
+            "Baseline slow-post content length [default: 4096]",
+        ),
+        (
+            "--method <VERB>",
+            "Override the HTTP method (GET, POST, PUT, ...)",
+        ),
+        (
+            "--path <PATH>",
+            "Override the request path [default: from target]",
+        ),
         ("--no-random-path", "Do not append a random query token"),
         ("--header <NAME:VALUE>", "Add a custom header (repeatable)"),
-        ("--body-file <FILE>", "Custom POST body for slow-post/chunked modes"),
-        ("--json", "Emit JSON stats lines to stdout (human output moves to stderr)"),
-        ("--stats-interval <SECS>", "Stats reporting interval [default: 1.0]"),
-        ("--max-errors <N>", "Circuit-breaker: exit after N consecutive errors"),
-        ("--fail-under <N>", "Exit non-zero if peak active connections < N"),
-        ("--fail-on-zero", "Exit non-zero if no connections were opened"),
+        (
+            "--body-file <FILE>",
+            "Custom POST body for slow-post/chunked modes",
+        ),
+        (
+            "--json",
+            "Emit JSON stats lines to stdout (human output moves to stderr)",
+        ),
+        (
+            "--stats-interval <SECS>",
+            "Stats reporting interval [default: 1.0]",
+        ),
+        (
+            "--max-errors <N>",
+            "Circuit-breaker: exit after N consecutive errors",
+        ),
+        (
+            "--fail-under <N>",
+            "Exit non-zero if peak active connections < N",
+        ),
+        (
+            "--fail-on-zero",
+            "Exit non-zero if no connections were opened",
+        ),
         ("--no-color", "Disable colored output"),
         ("--no-unicode", "Use ASCII symbols instead of Unicode"),
         ("--debug", "Enable debug output"),
@@ -103,7 +148,7 @@ mod tests {
     #[test]
     fn help_lists_sections_and_existing_flags() {
         let theme = Theme::plain();
-        let out = render("TorsHammer", "2.0.0", &theme, false);
+        let out = render("TorsHammer", "2.0.0", &theme, false, &crate::all_modes());
         for section in ["Usage", "Commands", "Options", "Examples", "Configuration"] {
             assert!(out.contains(section), "missing section {section}");
         }
@@ -115,14 +160,21 @@ mod tests {
 
     #[test]
     fn help_honors_plain_theme() {
-        let out = render("TorsHammer", "2.0.0", &Theme::plain(), false);
+        let out = render(
+            "TorsHammer",
+            "2.0.0",
+            &Theme::plain(),
+            false,
+            &crate::all_modes(),
+        );
         assert!(!out.contains("\x1b["));
     }
 
     #[test]
     fn help_lists_every_attack_mode() {
-        let out = render("TorsHammer", "2.0.0", &Theme::plain(), false);
-        for mode in crate::MODES {
+        let modes = crate::all_modes();
+        let out = render("TorsHammer", "2.0.0", &Theme::plain(), false, &modes);
+        for mode in &modes {
             assert!(out.contains(mode), "help is missing mode {mode}");
         }
     }

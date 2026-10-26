@@ -54,7 +54,8 @@ impl Rng {
         if hi <= lo {
             return lo;
         }
-        let span = (hi - lo + 1) as u64;
+        // Widen before adding 1 so `range_u8(0, 255)` does not overflow `u8`.
+        let span = hi as u64 - lo as u64 + 1;
         lo + (self.next_u64() % span) as u8
     }
 
@@ -95,6 +96,18 @@ impl Rng {
             .collect::<Vec<_>>()
             .join(".")
     }
+
+    /// `n` pseudorandom bytes (mirrors Python `secrets.token_bytes` for the TLS
+    /// ClientHello `random`). Not cryptography-grade, but the handshake is never
+    /// completed so cryptographic strength is irrelevant here.
+    pub fn random_bytes(&mut self, n: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(n);
+        while out.len() < n {
+            out.extend_from_slice(&self.next_u64().to_le_bytes());
+        }
+        out.truncate(n);
+        out
+    }
 }
 
 #[cfg(test)]
@@ -113,6 +126,27 @@ mod tests {
     }
 
     #[test]
+    fn range_u8_full_span_does_not_overflow() {
+        // `range_u8(0, 255)` used to panic on `255u8 + 1` while computing the
+        // span; it must return values across the whole u8 range instead.
+        let mut rng = Rng::new(21);
+        let mut hit_max = false;
+        for _ in 0..100_000 {
+            let v = rng.range_u8(0, 255);
+            if v == 255 {
+                hit_max = true;
+            }
+        }
+        assert!(
+            hit_max,
+            "range_u8(0, 255) never reached the top of its span"
+        );
+        // Degenerate and inverted ranges clamp to `lo`.
+        assert_eq!(Rng::new(1).range_u8(9, 9), 9);
+        assert_eq!(Rng::new(1).range_u8(9, 3), 9);
+    }
+
+    #[test]
     fn generated_strings_have_expected_charset_and_length() {
         let mut rng = Rng::new(11);
         assert_eq!(rng.hex(6).len(), 6);
@@ -127,5 +161,17 @@ mod tests {
         let mut a = Rng::new(1);
         let mut b = Rng::new(2);
         assert!((0..200).any(|_| a.next_u64() != b.next_u64()));
+    }
+
+    #[test]
+    fn random_bytes_length_and_divergence() {
+        let mut a = Rng::new(3);
+        let mut b = Rng::new(4);
+        let x = a.random_bytes(32);
+        let y = b.random_bytes(32);
+        assert_eq!(x.len(), 32);
+        assert_eq!(a.random_bytes(0), Vec::<u8>::new());
+        // A non-trivial prefix should differ between distinct seeds.
+        assert_ne!(&x[..8], &y[..8]);
     }
 }
