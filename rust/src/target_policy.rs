@@ -138,4 +138,43 @@ mod tests {
         assert!(check("127.0.0.1", false, &HashSet::new()).is_ok());
         assert!(check("localhost", false, &HashSet::new()).is_ok());
     }
+
+    #[test]
+    fn v6_mapped_and_global_inherit_v4_classification() {
+        // v4-mapped-to-IPv6 literals fall through the unique/local checks and
+        // inherit their embedded IPv4 classification (target_policy.rs L64-67).
+        assert!(is_private_or_local("::ffff:10.0.0.1")); // mapped private v4
+        assert!(!is_private_or_local("::ffff:8.8.8.8")); // mapped public v4
+                                                         // A genuine global v6 address has no v4 mapping and is not local.
+        assert!(!is_private_or_local("2001:db8::1"));
+    }
+
+    #[test]
+    fn load_allowlist_parses_comments_and_case() {
+        let path = unique_temp_path("allowlist");
+        let contents = "# upstreams\nExample.COM\n\n  spaced.local  \n# trailing\n";
+        fs::write(&path, contents).unwrap();
+        let list = load_allowlist(&path).unwrap();
+        assert!(list.contains("example.com"));
+        assert!(list.contains("spaced.local"));
+        assert_eq!(list.len(), 2);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_allowlist_missing_file_errors() {
+        let path = unique_temp_path("does-not-exist");
+        let _ = fs::remove_file(&path);
+        assert!(load_allowlist(&path).is_err());
+    }
+
+    fn unique_temp_path(tag: &str) -> String {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mut path = std::env::temp_dir();
+        path.push(format!("torshammer-{tag}-{}-{nonce}", std::process::id()));
+        path.to_string_lossy().into_owned()
+    }
 }

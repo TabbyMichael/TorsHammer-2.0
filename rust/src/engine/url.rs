@@ -26,9 +26,12 @@ pub fn parse(raw: &str) -> Result<Target, String> {
     } else {
         format!("http://{raw}")
     };
+    // Both branches above guarantee a `://` separator is present, so the split
+    // can never fail; `expect` documents that invariant without leaving an
+    // unreachable error-formatter closure behind.
     let (scheme, rest) = input
         .split_once("://")
-        .ok_or_else(|| format!("invalid target URL: {raw}"))?;
+        .expect("normalized target always contains a scheme separator");
     let scheme = scheme.to_ascii_lowercase();
     if scheme != "http" && scheme != "https" && scheme != "udp" {
         return Err(format!(
@@ -181,5 +184,31 @@ mod tests {
         assert!(parse("ftp://example.com").is_err());
         assert!(parse("http://").is_err());
         assert!(parse("http://example.com:notaport").is_err());
+    }
+
+    #[test]
+    fn out_of_range_port_errors() {
+        // `:99999` is all digits but overflows u16, so the `parse::<u16>`
+        // failure path (url.rs L68-70) must surface an error.
+        assert!(parse("http://example.com:99999").is_err());
+    }
+
+    #[test]
+    fn malformed_ipv6_literal_errors() {
+        // A bracketed literal missing its closing `]` (url.rs L50-52).
+        assert!(parse("http://[::1/").is_err());
+    }
+
+    #[test]
+    fn ipv6_invalid_port_errors() {
+        // A non-numeric port after a valid IPv6 literal (url.rs L58-61).
+        assert!(parse("http://[::1]:bad").is_err());
+    }
+
+    #[test]
+    fn empty_host_before_port_errors() {
+        // A leading colon yields an empty host after port parsing (url.rs L76-77).
+        assert!(parse("http://:8080/").is_err());
+        assert!(parse("http://:/").is_err());
     }
 }

@@ -151,6 +151,54 @@ class SlowServer:
         return b"".join(self._received_data)
 
 
+class FlakyServer:
+    """A server that reads a byte budget from each connection, then hangs up.
+
+    This models a target (or an intermediate LB) that accepts a slow request and
+    then closes the socket mid-stream, so profiles get a clean EOF (or a hard
+    reset) while they are still dribbling. Drives the read-error / connection-lost
+    sides of the profiles' send-and-drain loops.
+
+    ``close_after`` is the per-connection read budget after which the connection
+    is torn down; ``abort`` chooses a hard RST (``transport.abort()``) over a
+    graceful close (EOF), so both the ``reader.read()`` EOF and the
+    ``ConnectionResetError`` branches can be reproduced from tests.
+    """
+
+    def __init__(self, close_after: int = 16, abort: bool = False) -> None:
+        self.close_after = close_after
+        self.abort = abort
+        self.bytes_received = 0
+        self.connections = 0
+        self.server: asyncio.AbstractServer | None = None
+
+    async def _handle(self, reader, writer) -> None:
+        self.connections += 1
+        budget = self.close_after
+        try:
+            while budget > 0:
+                data = await reader.read(min(budget, 4096))
+                if not data:
+                    break
+                budget -= len(data)
+                self.bytes_received += len(data)
+        finally:
+            if self.abort:
+                writer.transport.abort()  # hard RST: peers see ConnectionResetError
+            else:
+                writer.close()  # graceful EOF: peers see reader.read() -> b""
+
+    async def start(self) -> FlakyServer:
+        self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        self.port = self.server.sockets[0].getsockname()[1]
+        return self
+
+    async def stop(self) -> None:
+        assert self.server is not None
+        self.server.close()
+        await self.server.wait_closed()
+
+
 class FakeSocks5:
     """A SOCKS5 (no-auth) proxy used to validate our async client handshake."""
 
@@ -466,6 +514,24 @@ async def _relay(a_reader, a_writer, b_reader, b_writer) -> None:
 @pytest.fixture
 async def slow_server() -> AsyncIterator[SlowServer]:
     srv = SlowServer()
+    await srv.start()
+    yield srv
+    await srv.stop()
+
+
+@pytest.fixture
+async def flaky_server() -> AsyncIterator[FlakyServer]:
+    """Closes each connection (clean EOF) after a small read budget."""
+    srv = FlakyServer(close_after=16, abort=False)
+    await srv.start()
+    yield srv
+    await srv.stop()
+
+
+@pytest.fixture
+async def reset_server() -> AsyncIterator[FlakyServer]:
+    """Resets each connection (hard RST) after a small read budget."""
+    srv = FlakyServer(close_after=16, abort=True)
     await srv.start()
     yield srv
     await srv.stop()

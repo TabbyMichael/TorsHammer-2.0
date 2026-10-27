@@ -275,4 +275,26 @@ mod tests {
         let text = String::from_utf8(out.lock().unwrap().clone()).unwrap();
         assert!(!text.contains("\x1b["));
     }
+
+    #[test]
+    fn success_is_always_emitted_to_stdout() {
+        // The success() helper (output.rs L141-143) and its Level::Success
+        // theme style (L39) are only reached through this entry point.
+        let (mut output, out, _err) = capture(false, -1); // quiet still shows success
+        output.success("Scan complete").unwrap();
+        assert_eq!(
+            String::from_utf8(out.lock().unwrap().clone()).unwrap(),
+            "[SUCCESS]  Scan complete\n"
+        );
+    }
+
+    #[test]
+    fn raw_writes_unlabeled_line_to_stdout() {
+        let (mut output, out, _err) = capture(false, 0);
+        output.raw("bare").unwrap();
+        assert_eq!(
+            String::from_utf8(out.lock().unwrap().clone()).unwrap(),
+            "bare\n"
+        );
+    }
 }

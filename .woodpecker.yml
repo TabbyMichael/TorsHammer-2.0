@@ -51,6 +51,22 @@ steps:
       - cargo build --manifest-path rust/Cargo.toml
       - cargo test --manifest-path rust/Cargo.toml
 
+  - name: rust-cov
+    image: rust:latest
+    commands:
+      # Coverage runs on stable (llvm-tools + cargo-llvm-cov). Enforce 100% of
+      # rust/src on the lcov line model, NOT --fail-under-lines 100: cargo-llvm-cov
+      # 0.9.1's `report` model spuriously flags ~12 already-executed
+      # continuation/brace lines in engine/mod.rs + main.rs that show/lcov count
+      # as covered (see docs/testing.md). This grep is the dependency-free
+      # equivalent of scripts/rust_cov_gate.py used by `make rust-cov` and GH CI.
+      - rustup component add llvm-tools-preview
+      - cargo install cargo-llvm-cov --locked
+      - mkdir -p rust/target/llvm-cov
+      - cargo llvm-cov --manifest-path rust/Cargo.toml --all-targets --lcov --output-path rust/target/llvm-cov/lcov.info
+      - if grep -nE '^DA:[0-9]+,0(,|$)' rust/target/llvm-cov/lcov.info; then echo 'FAIL: uncovered rust/src line(s) above'; exit 1; fi
+      - echo 'PASS rust/src: 0 uncovered lines (lcov model)'
+
 trigger:
   event:
     - push

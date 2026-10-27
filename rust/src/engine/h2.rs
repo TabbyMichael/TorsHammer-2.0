@@ -270,4 +270,24 @@ mod tests {
         assert_eq!(u32::from_be_bytes(rst[5..9].try_into().unwrap()), 5);
         assert_eq!(&rst[9..], &0u32.to_be_bytes());
     }
+
+    #[test]
+    fn headers_frame_sets_end_stream_flag_when_requested() {
+        let with_es = headers(3, b"\x00\x01\x02", true);
+        assert_eq!(with_es[3], HEADERS);
+        assert_ne!(with_es[4] & END_STREAM, 0);
+        assert_eq!(u32::from_be_bytes(with_es[5..9].try_into().unwrap()), 3);
+        assert_eq!(&with_es[9..], b"\x00\x01\x02");
+        let without_es = headers(3, b"\x00", false);
+        assert_eq!(without_es[4] & END_STREAM, 0);
+    }
+
+    #[test]
+    fn goaway_frame_encodes_last_stream_and_error() {
+        let ga = goaway(7, PROTOCOL_ERROR);
+        assert_eq!(ga[3], GOAWAY);
+        assert_eq!(u32::from_be_bytes(ga[5..9].try_into().unwrap()), 0); // conn stream
+        assert_eq!(&ga[9..13], &7u32.to_be_bytes()); // last stream id
+        assert_eq!(&ga[13..], &PROTOCOL_ERROR.to_be_bytes());
+    }
 }

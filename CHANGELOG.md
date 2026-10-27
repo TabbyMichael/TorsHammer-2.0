@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **100% test-coverage enforcement for both backends.** The Python suite now
+  holds `src/torshammer` at **100% line coverage** with `--cov-fail-under=100`
+  in `pyproject.toml`, up from the 87.9% baseline. New suites close the gaps
+  module by module: `test_config_validation.py` (full `__post_init__` rejection
+  matrix and layered-config discovery), `test_unit_branch_sweep.py` (pure
+  functions across `stats`/`summary`/`proxies`/`tls`/`h2`/`udp`),
+  `test_settings_resolution.py` (header-file and proxy-env resolution),
+  `test_profiles_coverage.py` (a mode-parametrized harness that drives all 31
+  TCP profiles against the new `flaky_server` fixture's mid-stream disconnect),
+  `test_engine_paths.py`, `test_cli_entry_paths.py` and the
+  `test_conn_edges.py`/`test_dispatch_edges.py`/`test_cluster_edges.py` trio
+  (including a first real execution of `cluster.run_worker`). Genuinely
+  non-executable code (POSIX-only imports, Windows-only signal handling, the
+  post-`os.execv` return, and the H2 stream-id overflow guard) is excluded with
+  a justified `# pragma: no cover` marker, all registered in
+  `docs/testing.md`. The Rust backend gained a `cargo-llvm-cov` gate held to
+  100% lines with a `.llvm-cov` exclusion register, wired into the `Makefile`
+  (`cov`/`rust-cov`) and both CI configs. No attack-mode semantics, flags or the
+  mode list changed.
+
 - **Simpler running: `--backend auto` default, bare-invocation quickstart, and a
   root `Makefile`.** `--backend` now defaults to `auto` instead of `python`: the
   Rust engine is used transparently only when a *properly installed* binary is on

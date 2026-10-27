@@ -13,7 +13,7 @@ CARGO   ?= cargo
 BIN     := $(VENV)/bin
 
 .DEFAULT_GOAL := help
-.PHONY: help venv install dev test lint type rust fmt-rust clippy rust-test check clean clean-rust publish-dry
+.PHONY: help venv install dev test lint type cov rust fmt-rust clippy rust-test rust-cov check clean clean-rust publish-dry
 
 help: ## Show this help
 	@echo "Torshammer 2.0 — available targets:"
@@ -52,7 +52,14 @@ rust: ## Build the Rust backend (release) -> rust/target/release/torshammer-rust
 rust-test: ## Run the Rust test suite
 	cd rust && $(CARGO) test
 
-check: lint type test fmt-rust clippy rust-test ## Run every Python + Rust gate
+cov: ## Python line-coverage gate (fails below 100% on src/torshammer)
+	$(BIN)/python -m pytest --cov=src/torshammer --cov-report=term-missing --cov-fail-under=100
+
+rust-cov: ## Rust line-coverage gate (cargo-llvm-cov, 100% of rust/src via lcov)
+	cd rust && mkdir -p target/llvm-cov && PATH="$(HOME)/.cargo/bin:$(PATH)" cargo llvm-cov --all-targets --lcov --output-path target/llvm-cov/lcov.info
+	@$(PY) scripts/rust_cov_gate.py rust/target/llvm-cov/lcov.info
+
+check: lint type cov fmt-rust clippy rust-test rust-cov ## Run every Python + Rust gate
 
 clean: ## Remove build/test artifacts
 	rm -rf build dist .pytest_cache .ruff_cache .mypy_cache $(VENV)
