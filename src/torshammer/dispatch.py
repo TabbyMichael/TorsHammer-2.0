@@ -225,4 +225,4 @@ def _forward_to_rust(config: Config, args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"error: failed to launch rust backend: {exc}", file=sys.stderr)
         return 1
-    return 0  # unreachable on POSIX: execv only returns on failure
+    return 0  # pragma: no cover - unreachable on POSIX: os.execv only returns on failure

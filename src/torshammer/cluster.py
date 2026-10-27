@@ -278,7 +278,10 @@ def _install_stop_handler(stop: asyncio.Event) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, stop.set)
-        except (NotImplementedError, RuntimeError):
+        except (
+            NotImplementedError,
+            RuntimeError,
+        ):  # pragma: no cover - Windows has no POSIX signal handlers
             pass  # e.g. Windows: Ctrl-C raises KeyboardInterrupt instead
 
 

@@ -254,4 +254,25 @@ mod tests {
         assert!(half.starts_with('['));
         assert!(half.ends_with('%'));
     }
+
+    #[test]
+    fn unicode_spinner_and_bar_use_glyphs() {
+        // Covers the unicode frame set (progress.rs L106), the unicode
+        // done_symbol branch (L129), and the unicode bar blocks (L185).
+        let mut sp = Spinner::new(true);
+        let frame = sp.tick();
+        assert_eq!(frame, '\u{25d0}');
+        assert_eq!(sp.done_symbol(), "\u{2713}");
+        assert_eq!(
+            progress_line(1.0, 3, true),
+            "[\u{2588}\u{2588}\u{2588}] 100%"
+        );
+    }
+
+    #[test]
+    fn elapsed_as_secs_accessor() {
+        // Reserved accessor (progress.rs L154-156) is not on the run path.
+        let e = Elapsed::start();
+        assert_eq!(e.as_secs(), 0);
+    }
 }

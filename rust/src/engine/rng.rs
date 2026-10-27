@@ -164,6 +164,14 @@ mod tests {
     }
 
     #[test]
+    fn range_f64_degenerate_bounds_clamp_to_lo() {
+        // hi <= lo short-circuits to lo (rng.rs L37-38) without drawing.
+        let mut rng = Rng::new(2);
+        assert_eq!(rng.range_f64(4.0, 4.0), 4.0);
+        assert_eq!(rng.range_f64(9.0, 3.0), 9.0);
+    }
+
+    #[test]
     fn random_bytes_length_and_divergence() {
         let mut a = Rng::new(3);
         let mut b = Rng::new(4);

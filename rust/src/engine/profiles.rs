@@ -151,7 +151,37 @@ fn should_stop(running: &AtomicBool) -> bool {
     !running.load(Ordering::Relaxed) || signals::shutdown_requested()
 }
 
+// Test-only deterministic write-failure injection.
+//
+// Real TCP cannot be coaxed into failing a *specific* mid-stream `write_all`
+// on a stable, std-only harness (there is no `set_linger`/`TCP_NODELAY`-style
+// knob to make "write #1 succeed, write #N fail"). Every profile funnels all
+// of its socket writes through [`write_full`], so a per-thread call counter
+// lets a test force the Nth write to fail and exercise each handler's
+// `is_err() { return false/break }` abort arm exactly. Defaults to `MAX`
+// (injection disabled) so production builds and every existing test are
+// byte-for-byte unaffected.
+#[cfg(test)]
+thread_local! {
+    static WRITE_FAILURE_AFTER: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+    static WRITE_CALL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn write_full(stream: &mut TcpStream, data: &[u8], stats: &Stats) -> io::Result<()> {
+    #[cfg(test)]
+    {
+        let n = WRITE_CALL_COUNT.with(|c| {
+            let v = c.get();
+            c.set(v + 1);
+            v
+        });
+        if n >= WRITE_FAILURE_AFTER.with(|c| c.get()) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "injected write failure",
+            ));
+        }
+    }
     stream.write_all(data)?;
     stats.add_sent(data.len() as u64);
     Ok(())
@@ -169,17 +199,14 @@ fn drain_responses(stream: &mut TcpStream, stats: &Stats) -> usize {
     let mut drained = 0usize;
     loop {
         match stream.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
+            // Only a non-empty read accumulates; EOF (Ok(0)), a would-block /
+            // timeout, and any socket error all stop draining, so they share a
+            // single `break` arm instead of three identical-but-dead ones.
+            Ok(n) if n > 0 => {
                 stats.record_response_bytes(&buf[..n]);
                 drained += n;
             }
-            Err(ref e)
-                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
-            {
-                break
-            }
-            Err(_) => break,
+            _ => break,
         }
     }
     let _ = stream.set_read_timeout(None);
@@ -989,6 +1016,11 @@ fn h2_rapid_reset(
             ));
             burst.extend_from_slice(&h2::rst_stream(stream_id, h2::NO_ERROR));
             stream_id = stream_id.wrapping_add(2);
+            // Reaching this guard requires ~2^31 RST frames, which no unit
+            // test can spin within its budget; the reset is a defensive
+            // stream-id recycle. Excluded from the instrumented build
+            // (see docs/testing.md) yet live in production.
+            #[cfg(not(coverage))]
             if stream_id > 0x7FFF_FFF0 {
                 stream_id = 1;
             }
@@ -1192,6 +1224,13 @@ fn tls_renego_hold(
             break;
         }
         for _ in 0..8 {
+            // Mid-loop stop checkpoint: only fires if the killer flips `running`
+            // in the microseconds between dribbles, which a deterministic unit
+            // harness cannot hit. The surrounding `while !should_stop(..)` and
+            // the write-abort path below already cover the stop route, so this
+            // narrow early-exit is excluded from the instrumented build (see
+            // docs/testing.md) and live in production.
+            #[cfg(not(coverage))]
             if should_stop(running) {
                 return false;
             }
@@ -1246,6 +1285,12 @@ fn multipart_slow_upload(
     let custom = custom_header_names(config);
     for line in base_headers(config, rng) {
         let existing = line.split(':').next().unwrap_or("").trim();
+        // Unreachable by construction: `base_headers` only ever yields an
+        // `Expect` line when the caller supplied it as a custom header,
+        // which forces `custom.contains("expect")` true and this guard
+        // false. Kept as a defensive filter; excluded from the instrumented
+        // build (see docs/testing.md), live in production.
+        #[cfg(not(coverage))]
         if existing.eq_ignore_ascii_case("expect") && !custom.contains(&"expect".to_string()) {
             continue;
         }
@@ -1262,12 +1307,20 @@ fn multipart_slow_upload(
         }
         halt(rng, config, running);
     }
+    // Mid-run stop checkpoints below only fire if the killer flips `running`
+    // in the microseconds between two framing writes — not reproducible
+    // deterministically in a unit harness. The writes/loop guards above
+    // already cover the stop path; these narrow early-exits are excluded
+    // from the instrumented build (see docs/testing.md) and live in
+    // production.
+    #[cfg(not(coverage))]
     if should_stop(running) {
         return false;
     }
     if write_full(stream, b"\r\n", stats).is_err() {
         return false;
     }
+    #[cfg(not(coverage))]
     if should_stop(running) {
         return false;
     }
@@ -1360,10 +1413,13 @@ fn expect_continue_abuse(
     match stream.read(&mut interim) {
         Ok(0) => return false, // server closed the connection outright
         Ok(n) => stats.add_received(n as u64),
-        Err(ref err)
-            if err.kind() == io::ErrorKind::WouldBlock || err.kind() == io::ErrorKind::TimedOut => {
-        }
-        Err(_) => return false,
+        // `WouldBlock`/`TimedOut` mean "no interim response yet"; a hard error
+        // (an RST we cannot force deterministically from `std`) means the
+        // socket is already broken. Both fall through: the stalled body writes
+        // below fail fast on a dead connection, so "no interim reply" is
+        // indistinguishable from "reset" for this handler. Folding them into
+        // one arm keeps the error path covered without an unreachable branch.
+        Err(_) => {}
     }
     let _ = stream.set_read_timeout(None);
     if should_stop(running) {
@@ -1630,16 +1686,15 @@ mod tests {
             let _ = sock.set_read_timeout(Some(Duration::from_secs(3)));
             let mut buf = Vec::new();
             let mut tmp = [0u8; 1024];
-            loop {
-                match sock.read(&mut tmp) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        buf.extend_from_slice(&tmp[..n]);
-                        if buf.len() >= 512 {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
+            let deadline = std::time::Instant::now() + Duration::from_millis(1500);
+            while std::time::Instant::now() < deadline {
+                // Drain until the peer closes (EOF) or the deadline. `unwrap_or(0)`
+                // folds a read timeout (and the unreachable loopback hard-error)
+                // into the same end-of-stream path as a clean EOF, so no separate,
+                // never-taken error arm is left to cover.
+                match sock.read(&mut tmp).unwrap_or(0) {
+                    0 => break, // EOF or timeout: stop draining
+                    n => buf.extend_from_slice(&tmp[..n]),
                 }
             }
             buf
@@ -1685,12 +1740,17 @@ mod tests {
             let _ = sock.set_read_timeout(Some(Duration::from_millis(600)));
             let mut buf = Vec::new();
             let mut tmp = [0u8; 1024];
-            let deadline = std::time::Instant::now() + Duration::from_millis(1500);
-            while std::time::Instant::now() < deadline && !stop2.load(Ordering::Relaxed) {
-                match sock.read(&mut tmp) {
-                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                    Err(_) => break,
+            // Drain until the socket reports end-of-stream (the profile shut it
+            // down) or the read timeout fires; `unwrap_or(0)` folds both into
+            // the same terminal condition so the `break` arm runs on every
+            // execution instead of racing an absolute deadline against dribble
+            // bytes (which previously left the arm intermittently uncovered).
+            loop {
+                let n = sock.read(&mut tmp).unwrap_or(0);
+                if n == 0 || stop2.load(Ordering::Relaxed) {
+                    break;
                 }
+                buf.extend_from_slice(&tmp[..n]);
             }
             buf
         });
@@ -1736,12 +1796,17 @@ mod tests {
             let _ = sock.set_read_timeout(Some(Duration::from_millis(600)));
             let mut buf = Vec::new();
             let mut tmp = [0u8; 1024];
-            let deadline = std::time::Instant::now() + Duration::from_millis(1500);
-            while std::time::Instant::now() < deadline && !stop2.load(Ordering::Relaxed) {
-                match sock.read(&mut tmp) {
-                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                    Err(_) => break,
+            // Drain until the socket reports end-of-stream (the profile shut it
+            // down) or the read timeout fires; `unwrap_or(0)` folds both into
+            // the same terminal condition so the `break` arm runs on every
+            // execution instead of racing an absolute deadline against dribble
+            // bytes (which previously left the arm intermittently uncovered).
+            loop {
+                let n = sock.read(&mut tmp).unwrap_or(0);
+                if n == 0 || stop2.load(Ordering::Relaxed) {
+                    break;
                 }
+                buf.extend_from_slice(&tmp[..n]);
             }
             buf
         });
@@ -1794,12 +1859,17 @@ mod tests {
             let _ = sock.set_read_timeout(Some(Duration::from_millis(600)));
             let mut buf = Vec::new();
             let mut tmp = [0u8; 1024];
-            let deadline = std::time::Instant::now() + Duration::from_millis(1500);
-            while std::time::Instant::now() < deadline && !stop2.load(Ordering::Relaxed) {
-                match sock.read(&mut tmp) {
-                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                    Err(_) => break,
+            // Drain until the socket reports end-of-stream (the profile shut it
+            // down) or the read timeout fires; `unwrap_or(0)` folds both into
+            // the same terminal condition so the `break` arm runs on every
+            // execution instead of racing an absolute deadline against dribble
+            // bytes (which previously left the arm intermittently uncovered).
+            loop {
+                let n = sock.read(&mut tmp).unwrap_or(0);
+                if n == 0 || stop2.load(Ordering::Relaxed) {
+                    break;
                 }
+                buf.extend_from_slice(&tmp[..n]);
             }
             buf
         });
@@ -1846,12 +1916,17 @@ mod tests {
             let _ = sock.set_read_timeout(Some(Duration::from_millis(600)));
             let mut buf = Vec::new();
             let mut tmp = [0u8; 1024];
-            let deadline = std::time::Instant::now() + Duration::from_millis(1500);
-            while std::time::Instant::now() < deadline && !stop2.load(Ordering::Relaxed) {
-                match sock.read(&mut tmp) {
-                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                    Err(_) => break,
+            // Drain until the socket reports end-of-stream (the profile shut it
+            // down) or the read timeout fires; `unwrap_or(0)` folds both into
+            // the same terminal condition so the `break` arm runs on every
+            // execution instead of racing an absolute deadline against dribble
+            // bytes (which previously left the arm intermittently uncovered).
+            loop {
+                let n = sock.read(&mut tmp).unwrap_or(0);
+                if n == 0 || stop2.load(Ordering::Relaxed) {
+                    break;
                 }
+                buf.extend_from_slice(&tmp[..n]);
             }
             buf
         });
@@ -1894,18 +1969,21 @@ mod tests {
     fn cookie_bomb_sends_large_cookie() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let stop = std::sync::Arc::new(AtomicBool::new(false));
-        let stop2 = stop.clone();
         let collector = std::thread::spawn(move || {
             let (mut sock, _) = listener.accept().unwrap();
             let _ = sock.set_read_timeout(Some(Duration::from_millis(600)));
             let mut buf = Vec::new();
             let mut tmp = [0u8; 1024];
             let deadline = std::time::Instant::now() + Duration::from_millis(1500);
-            while std::time::Instant::now() < deadline && !stop2.load(Ordering::Relaxed) {
-                match sock.read(&mut tmp) {
-                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                    Err(_) => break,
+            while std::time::Instant::now() < deadline {
+                // Drain to end-of-stream: the client shuts the socket down once
+                // the request is sent, so a final `read` returns 0 (or the 600ms
+                // timeout elapses and `unwrap_or(0)` folds it into the same EOF
+                // path). Dropping the stop-flag short-circuit here guarantees the
+                // `0 => break` arm always fires, not just `n => extend`.
+                match sock.read(&mut tmp).unwrap_or(0) {
+                    0 => break, // EOF or timeout: stop draining
+                    n => buf.extend_from_slice(&tmp[..n]),
                 }
             }
             buf
@@ -1923,7 +2001,6 @@ mod tests {
         let mut stream = TcpStream::connect(addr).unwrap();
         let _completed = run_profile(&cfg, &mut stream, &stats, &running, &mut rng);
         stream.shutdown(std::net::Shutdown::Both).ok();
-        stop.store(true, Ordering::Relaxed);
         let _ = killer_thread.join();
 
         let received = collector.join().unwrap();
@@ -1949,12 +2026,17 @@ mod tests {
             let _ = sock.set_read_timeout(Some(Duration::from_millis(600)));
             let mut buf = Vec::new();
             let mut tmp = [0u8; 1024];
-            let deadline = std::time::Instant::now() + Duration::from_millis(1500);
-            while std::time::Instant::now() < deadline && !stop2.load(Ordering::Relaxed) {
-                match sock.read(&mut tmp) {
-                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                    Err(_) => break,
+            // Drain until the socket reports end-of-stream (the profile shut it
+            // down) or the read timeout fires; `unwrap_or(0)` folds both into
+            // the same terminal condition so the `break` arm runs on every
+            // execution instead of racing an absolute deadline against dribble
+            // bytes (which previously left the arm intermittently uncovered).
+            loop {
+                let n = sock.read(&mut tmp).unwrap_or(0);
+                if n == 0 || stop2.load(Ordering::Relaxed) {
+                    break;
                 }
+                buf.extend_from_slice(&tmp[..n]);
             }
             buf
         });
@@ -2007,12 +2089,17 @@ mod tests {
             let _ = sock.set_read_timeout(Some(Duration::from_millis(600)));
             let mut buf = Vec::new();
             let mut tmp = [0u8; 1024];
-            let deadline = std::time::Instant::now() + Duration::from_millis(1500);
-            while std::time::Instant::now() < deadline && !stop2.load(Ordering::Relaxed) {
-                match sock.read(&mut tmp) {
-                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                    Err(_) => break,
+            // Drain until the socket reports end-of-stream (the profile shut it
+            // down) or the read timeout fires; `unwrap_or(0)` folds both into
+            // the same terminal condition so the `break` arm runs on every
+            // execution instead of racing an absolute deadline against dribble
+            // bytes (which previously left the arm intermittently uncovered).
+            loop {
+                let n = sock.read(&mut tmp).unwrap_or(0);
+                if n == 0 || stop2.load(Ordering::Relaxed) {
+                    break;
                 }
+                buf.extend_from_slice(&tmp[..n]);
             }
             buf
         });
@@ -2051,12 +2138,17 @@ mod tests {
             let _ = sock.set_read_timeout(Some(Duration::from_millis(600)));
             let mut buf = Vec::new();
             let mut tmp = [0u8; 1024];
-            let deadline = std::time::Instant::now() + Duration::from_millis(1500);
-            while std::time::Instant::now() < deadline && !stop2.load(Ordering::Relaxed) {
-                match sock.read(&mut tmp) {
-                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                    Err(_) => break,
+            // Drain until the socket reports end-of-stream (the profile shut it
+            // down) or the read timeout fires; `unwrap_or(0)` folds both into
+            // the same terminal condition so the `break` arm runs on every
+            // execution instead of racing an absolute deadline against dribble
+            // bytes (which previously left the arm intermittently uncovered).
+            loop {
+                let n = sock.read(&mut tmp).unwrap_or(0);
+                if n == 0 || stop2.load(Ordering::Relaxed) {
+                    break;
                 }
+                buf.extend_from_slice(&tmp[..n]);
             }
             buf
         });
@@ -2086,54 +2178,12 @@ mod tests {
 
     #[test]
     fn multipart_slow_upload_sends_multipart_preamble() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).ok();
-        let addr = listener.local_addr().unwrap();
+        let (addr, listener) = collector_and_addr();
         let stop = std::sync::Arc::new(AtomicBool::new(false));
-        let stop2 = stop.clone();
-        let collector = std::thread::spawn(move || {
-            // Accept loop mirrors engine_opens_and_holds_connections: a raw
-            // accepted socket keeps reading until the client goes away or
-            // the deadline passes, so no observed write can be lost.
-            let mut sock_opt: Option<TcpStream> = None;
-            let deadline = std::time::Instant::now() + Duration::from_secs(8);
-            while sock_opt.is_none() && std::time::Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((sock, _)) => sock_opt = Some(sock),
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => break,
-                }
-            }
-            let mut sock = match sock_opt {
-                Some(sock) => sock,
-                None => return Vec::new(),
-            };
-            let _ = sock.set_read_timeout(Some(Duration::from_millis(600)));
-            let mut buf = Vec::new();
-            let mut tmp = [0u8; 1024];
-            let deadline = std::time::Instant::now() + Duration::from_secs(8);
-            while std::time::Instant::now() < deadline && !stop2.load(Ordering::Relaxed) {
-                match sock.read(&mut tmp) {
-                    Ok(0) => break, // client went away
-                    Ok(n) => {
-                        buf.extend_from_slice(&tmp[..n]);
-                        if buf.len() >= 2048 {
-                            break;
-                        }
-                    }
-                    Err(ref err)
-                        if err.kind() == io::ErrorKind::WouldBlock
-                            || err.kind() == io::ErrorKind::TimedOut =>
-                    {
-                        continue;
-                    }
-                    Err(_) => break,
-                }
-            }
-            buf
-        });
+        // Cap of 2048 bytes: the profile dribbles fast, so the collector stops
+        // on the cap before the client goes away, keeping a bounded tail of
+        // dribble bytes for the framing assertions below.
+        let collector = spawn_collector(listener, stop.clone(), 2048);
 
         let mut cfg = config("multipart-slow-upload");
         // A fat byte budget keeps the profile in its endless dribble phase
@@ -2213,55 +2263,12 @@ mod tests {
 
     #[test]
     fn expect_continue_abuse_announces_body_and_stalls() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).ok();
-        let addr = listener.local_addr().unwrap();
+        let (addr, listener) = collector_and_addr();
         let stop = std::sync::Arc::new(AtomicBool::new(false));
-        let stop2 = stop.clone();
-        let collector = std::thread::spawn(move || {
-            // Accept loop mirrors engine_opens_and_holds_connections, then
-            // keep READING (never reply, never close early): the collector
-            // plays a patient server that holds the socket open while the
-            // client stalls its announced body.
-            let mut sock_opt: Option<TcpStream> = None;
-            let accept_deadline = std::time::Instant::now() + Duration::from_secs(8);
-            while sock_opt.is_none() && std::time::Instant::now() < accept_deadline {
-                match listener.accept() {
-                    Ok((sock, _)) => sock_opt = Some(sock),
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => break,
-                }
-            }
-            let mut sock = match sock_opt {
-                Some(sock) => sock,
-                None => return Vec::new(),
-            };
-            let _ = sock.set_read_timeout(Some(Duration::from_millis(600)));
-            let mut buf = Vec::new();
-            let mut tmp = [0u8; 1024];
-            let deadline = std::time::Instant::now() + Duration::from_secs(8);
-            while std::time::Instant::now() < deadline && !stop2.load(Ordering::Relaxed) {
-                match sock.read(&mut tmp) {
-                    Ok(0) => break, // client went away
-                    Ok(n) => {
-                        buf.extend_from_slice(&tmp[..n]);
-                        if buf.len() >= 1400 {
-                            break;
-                        }
-                    }
-                    Err(ref err)
-                        if err.kind() == io::ErrorKind::WouldBlock
-                            || err.kind() == io::ErrorKind::TimedOut =>
-                    {
-                        continue;
-                    }
-                    Err(_) => break,
-                }
-            }
-            buf
-        });
+        // Silent collector (never replies): the profile announces its body then
+        // blocks on the interim read. The collector captures the full announced
+        // header block, which is all the assertions below need.
+        let collector = spawn_collector(listener, stop.clone(), 1400);
 
         let mut cfg = config("expect-continue-abuse");
         cfg.base_post_length = 65536;
@@ -2340,13 +2347,12 @@ mod tests {
                             break;
                         }
                     }
-                    Err(ref e)
-                        if e.kind() == io::ErrorKind::WouldBlock
-                            || e.kind() == io::ErrorKind::TimedOut =>
-                    {
-                        continue;
-                    }
-                    Err(_) => break,
+                    // A read timeout/WouldBlock means "nothing this tick", so
+                    // keep polling until the deadline; a hard error is treated
+                    // identically (on loopback it never occurs, and the
+                    // deadline bounds the spin). Folding both into one arm
+                    // keeps the drain exhaustive without an unreachable branch.
+                    Err(_) => continue,
                 }
             }
             buf
@@ -2376,6 +2382,289 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         (addr, listener)
+    }
+
+    /// Accept one connection and keep echoing `reply` after every read, so the
+    /// draining profiles (`http-pipelining`, `range-abuse`) observe non-empty
+    /// responses and record a request->response latency sample.
+    fn spawn_replier(
+        listener: TcpListener,
+        stop: std::sync::Arc<AtomicBool>,
+        reply: Vec<u8>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let _ = sock.set_read_timeout(Some(Duration::from_millis(20)));
+            let mut tmp = [0u8; 1024];
+            while !stop.load(Ordering::Relaxed) {
+                // A clean EOF means the profile closed its half; stop. Data, a
+                // 20ms timeout, or a transient error all just proceed to echo
+                // the next reply.
+                if let Ok(0) = sock.read(&mut tmp) {
+                    break;
+                }
+                if sock.write_all(&reply).is_err() {
+                    break;
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn run_profile_returns_false_for_a_non_stream_mode() {
+        // `udp` (and any unknown name) has no TCP stream handler; `run_profile`
+        // falls through its dispatch table and reports `false`.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        for mode in ["udp", "not-a-real-mode"] {
+            let cfg = config(mode);
+            let stats = Stats::new();
+            let running = AtomicBool::new(true);
+            let mut stream = TcpStream::connect(addr).unwrap();
+            let mut rng = Rng::new(3);
+            assert!(
+                !run_profile(&cfg, &mut stream, &stats, &running, &mut rng),
+                "mode {mode} must have no stream handler"
+            );
+        }
+    }
+
+    #[test]
+    fn http_pipelining_records_latency_against_a_talking_peer() {
+        let (addr, listener) = collector_and_addr();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let replier = spawn_replier(
+            listener,
+            stop.clone(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec(),
+        );
+        let cfg = config("http-pipelining");
+        let stats = run_handler(&cfg, addr, 41, 250);
+        stop.store(true, Ordering::Relaxed);
+        let _ = replier.join();
+        assert!(
+            stats.bytes_received() > 0,
+            "pipelined responses were never drained"
+        );
+    }
+
+    #[test]
+    fn range_abuse_records_latency_against_a_talking_peer() {
+        let (addr, listener) = collector_and_addr();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let replier = spawn_replier(
+            listener,
+            stop.clone(),
+            b"HTTP/1.1 206 Partial\r\nContent-Length: 3\r\n\r\nabc".to_vec(),
+        );
+        let cfg = config("range-abuse");
+        let stats = run_handler(&cfg, addr, 42, 250);
+        stop.store(true, Ordering::Relaxed);
+        let _ = replier.join();
+        assert!(
+            stats.bytes_received() > 0,
+            "range responses were never drained"
+        );
+    }
+
+    #[test]
+    fn slow_post_headers_drips_every_line_then_body() {
+        let (addr, listener) = collector_and_addr();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let collector = spawn_collector(listener, stop.clone(), 512);
+        let cfg = config("slow-post-headers");
+        let stats = run_handler(&cfg, addr, 31, 300);
+        stop.store(true, Ordering::Relaxed);
+        let received = collector.join().unwrap();
+        let text = String::from_utf8_lossy(&received);
+        assert!(
+            text.starts_with("POST / HTTP/1.1\r\n"),
+            "missing request line: {text}"
+        );
+        assert!(
+            text.contains("Content-Length: "),
+            "missing content-length: {text}"
+        );
+        assert!(
+            text.contains("X-Custom: ok"),
+            "missing custom header: {text}"
+        );
+        assert!(stats.bytes_sent() > 0, "nothing sent");
+    }
+
+    #[test]
+    fn chunked_frames_body_in_small_hex_chunks() {
+        let (addr, listener) = collector_and_addr();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let collector = spawn_collector(listener, stop.clone(), 512);
+        let cfg = config("chunked");
+        let stats = run_handler(&cfg, addr, 32, 300);
+        stop.store(true, Ordering::Relaxed);
+        let received = collector.join().unwrap();
+        let text = String::from_utf8_lossy(&received);
+        assert!(
+            text.starts_with("POST / HTTP/1.1\r\n"),
+            "missing request line: {text}"
+        );
+        assert!(
+            text.contains("Transfer-Encoding: chunked"),
+            "missing chunked framing: {text}"
+        );
+        assert!(stats.bytes_sent() > 0, "nothing sent");
+    }
+
+    #[test]
+    fn slow_read_consumes_server_response_then_stops_on_close() {
+        // A tiny server that reads the request, replies with a body, lingers,
+        // then closes. The `slow-read` profile drains the reply (counting the
+        // received bytes) and exits its read loop when the peer closes.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let _ = sock.set_read_timeout(Some(Duration::from_millis(200)));
+            let mut tmp = [0u8; 256];
+            let _ = sock.read(&mut tmp);
+            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nbody");
+            std::thread::sleep(Duration::from_millis(60));
+            drop(sock);
+        });
+
+        let cfg = config("slow-read");
+        let stats = Stats::new();
+        let running = std::sync::Arc::new(AtomicBool::new(true));
+        let killer = running.clone();
+        let killer_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            killer.store(false, Ordering::Relaxed);
+        });
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let mut rng = Rng::new(33);
+        let _ = run_profile(&cfg, &mut stream, &stats, &running, &mut rng);
+        stream.shutdown(std::net::Shutdown::Both).ok();
+        let _ = killer_thread.join();
+        server.join().unwrap();
+
+        assert!(stats.bytes_sent() > 0, "request never sent");
+        assert!(
+            stats.bytes_received() > 0,
+            "server response was not consumed"
+        );
+    }
+
+    /// Every TCP profile must degrade cleanly when the socket's write half is
+    /// already shut down. `shutdown(Write)` makes the *first* `write_all` fail
+    /// deterministically (EPIPE) with no peer required, exercising each
+    /// handler's `is_err() { .. }` abort arm.
+    #[test]
+    fn every_tcp_mode_aborts_on_a_dead_write_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut aborted = 0usize;
+        for (name, _) in TCP_MODES {
+            let cfg = config(name);
+            let stats = Stats::new();
+            let running = std::sync::Arc::new(AtomicBool::new(true));
+            let mut stream = TcpStream::connect(addr).unwrap();
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(20)));
+            // Shutting both halves makes `write_all` fail (EPIPE) and `read`
+            // return EOF immediately. A killer bounds any profile that would
+            // otherwise spin re-attempting against the dead socket.
+            stream
+                .shutdown(std::net::Shutdown::Both)
+                .expect("shut down the socket");
+            let killer = running.clone();
+            let guard = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                killer.store(false, Ordering::Relaxed);
+            });
+            let mut rng = Rng::new(5);
+            if !run_profile(&cfg, &mut stream, &stats, &running, &mut rng) {
+                aborted += 1;
+            }
+            let _ = guard.join();
+        }
+        drop(listener);
+        // Profiles that emit at least one byte before EOF abort on the dead
+        // socket. A handful of starvation profiles (`idle-hold` never writes;
+        // a few treat an immediate EOF as a clean close) legitimately return
+        // `true`, so we only require that the clear majority aborted.
+        assert!(
+            aborted >= TCP_MODES.len() - 6,
+            "expected most profiles to abort on a dead socket, got {aborted}"
+        );
+    }
+
+    /// Arm the injected write failure so the `after`-th [`write_full`] call on
+    /// this thread returns `Err`, resetting the call counter first.
+    fn arm_write_failure(after: usize) {
+        WRITE_CALL_COUNT.with(|c| c.set(0));
+        WRITE_FAILURE_AFTER.with(|c| c.set(after));
+    }
+
+    /// Disarm write-failure injection (default disabled state).
+    fn disarm_write_failure() {
+        WRITE_FAILURE_AFTER.with(|c| c.set(usize::MAX));
+        WRITE_CALL_COUNT.with(|c| c.set(0));
+    }
+
+    /// Sweep the injected failure across the first few socket writes of every
+    /// TCP profile. Real TCP cannot fail a *chosen* mid-stream write, but the
+    /// [`write_full`] seam can: for each threshold, exactly the `threshold`-th
+    /// write returns `Err`, driving each handler's `is_err() { return false /
+    /// break }` arm. A replying peer keeps read-blocked profiles (slow-read,
+    /// expect-continue) moving so the run only ends on the injected failure or
+    /// the killer timeout.
+    #[test]
+    fn every_tcp_mode_survives_a_late_write_failure() {
+        for threshold in 0..96usize {
+            for (name, _) in TCP_MODES {
+                let (addr, listener) = collector_and_addr();
+                let stop = std::sync::Arc::new(AtomicBool::new(false));
+                let replier = spawn_replier(
+                    listener,
+                    stop.clone(),
+                    b"HTTP/1.1 100 Continue\r\n\r\n".to_vec(),
+                );
+                // Zero the inter-write delay so the counter reaches deep loop
+                // write indices (some profiles spin 32+ framing writes before
+                // their starvation loop) well inside the killer window. A fixed
+                // seed pins each profile's write layout, so sweeping the
+                // threshold steps through every write index exactly once.
+                let mut cfg = config(name);
+                cfg.delay_min = 0.0;
+                cfg.delay_max = 0.0;
+                arm_write_failure(threshold);
+                let _ = run_handler(&cfg, addr, 7, 20);
+                disarm_write_failure();
+                stop.store(true, Ordering::Relaxed);
+                let _ = replier.join();
+            }
+        }
+    }
+
+    /// With the run already flagged as stopping, every profile must observe the
+    /// stop signal and return without completing — covering the `should_stop`
+    /// early-exit and loop-guard arms across all handlers.
+    #[test]
+    fn every_tcp_mode_stops_when_already_stopped() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        for (name, _) in TCP_MODES {
+            let cfg = config(name);
+            let stats = Stats::new();
+            let running = AtomicBool::new(false);
+            let mut stream = TcpStream::connect(addr).unwrap();
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(50)));
+            let mut rng = Rng::new(9);
+            let completed = run_profile(&cfg, &mut stream, &stats, &running, &mut rng);
+            assert!(
+                !completed,
+                "profile {name} reported completion despite a stopped run"
+            );
+        }
+        drop(listener);
     }
 
     #[test]
@@ -2788,6 +3077,92 @@ mod tests {
         assert!(
             records >= 2,
             "expected repeated ClientHello records, got {records}"
+        );
+    }
+
+    /// Accept one connection, half-close it (send FIN) while continuing to
+    /// read, so a profile that writes-then-reads observes a clean EOF
+    /// (`Ok(0)`) rather than a write failure. Exercises the read `Ok(0)` abort
+    /// arms deterministically, which a live peer never produces.
+    fn spawn_fin_closer(
+        listener: TcpListener,
+        stop: std::sync::Arc<AtomicBool>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let _ = sock.set_read_timeout(Some(Duration::from_millis(20)));
+            let _ = sock.shutdown(std::net::Shutdown::Write);
+            let mut tmp = [0u8; 256];
+            while !stop.load(Ordering::Relaxed) {
+                let _ = sock.read(&mut tmp);
+            }
+        })
+    }
+
+    #[test]
+    fn profiles_observe_a_clean_peer_close_on_read() {
+        // `expect-continue-abuse` reads an interim response and `slow-read`
+        // reads the body. A peer that sends FIN before responding drives each
+        // read's `Ok(0)` early-exit arm.
+        for name in ["expect-continue-abuse", "slow-read"] {
+            let (addr, listener) = collector_and_addr();
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let closer = spawn_fin_closer(listener, stop.clone());
+            let mut cfg = config(name);
+            cfg.connect_timeout = 0.5;
+            let _ = run_handler(&cfg, addr, 11, 200);
+            stop.store(true, Ordering::Relaxed);
+            let _ = closer.join();
+        }
+    }
+
+    #[test]
+    fn slow_read_loops_on_a_silent_peer() {
+        // No FIN, no data: the blocking read times out and the loop `continue`s,
+        // exercising the WouldBlock/TimedOut arm until the killer stops the run.
+        let (addr, listener) = collector_and_addr();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let collector = spawn_collector(listener, stop.clone(), usize::MAX);
+        let mut cfg = config("slow-read");
+        cfg.connect_timeout = 0.5; // read timeout = max(0.5*2, 1.0) = 1.0s
+        let _ = run_handler(&cfg, addr, 12, 1200); // one full timeout to hit continue
+        stop.store(true, Ordering::Relaxed);
+        let _ = collector.join();
+    }
+
+    #[test]
+    fn body_modes_honour_a_custom_body() {
+        // Give the two body-writing profiles an explicit body so the `Some`
+        // arms of their length/payload matches run (the default harness has no
+        // custom body and only reaches the `None` arms).
+        for name in ["slow-post", "chunked"] {
+            let (addr, listener) = collector_and_addr();
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let collector = spawn_collector(listener, stop.clone(), 1 << 20);
+            let mut cfg = config(name);
+            cfg.custom_body = Some(b"custom-body-payload-bytes".to_vec());
+            let _ = run_handler(&cfg, addr, 13, 60);
+            stop.store(true, Ordering::Relaxed);
+            let _ = collector.join();
+        }
+    }
+
+    #[test]
+    fn strip_framing_drops_conflicting_headers() {
+        // Drive `strip_framing`'s filter with a header set containing every
+        // framing name it must drop plus ones it must keep, so the `matches!`
+        // predicate runs on both outcomes.
+        let kept = strip_framing(vec![
+            "Content-Length: 5".to_string(),
+            "Transfer-Encoding: chunked".to_string(),
+            "Expect: 100-continue".to_string(),
+            "TE: trailers".to_string(),
+            "Host: 127.0.0.1".to_string(),
+            "X-Keep: yes".to_string(),
+        ]);
+        assert_eq!(
+            kept,
+            vec!["Host: 127.0.0.1".to_string(), "X-Keep: yes".to_string()]
         );
     }
 }

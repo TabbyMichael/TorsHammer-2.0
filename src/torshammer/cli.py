@@ -19,7 +19,7 @@ from typing import Final
 
 try:
     import resource
-except ImportError:  # Windows / platforms without POSIX resource module
+except ImportError:  # pragma: no cover - Windows / platforms without the POSIX resource module
     resource = None  # type: ignore[assignment]
 
 HAS_RESOURCE = resource is not None and hasattr(resource, "RLIMIT_NOFILE")

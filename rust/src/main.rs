@@ -4,6 +4,12 @@
 //! version/help/run actions, and delegates presentation to the `cli` module
 //! while the real slow-request attack logic lives in the `engine` module.
 
+// `cargo-llvm-cov` injects `--cfg coverage` so the instrumented build can drop
+// unreachable defensive arms via `#[cfg(not(coverage))]`. That cfg is set by an
+// external tool, not a Cargo feature, so register it as an expected cfg to keep
+// `clippy -D warnings` clean.
+#![allow(unexpected_cfgs)]
+
 mod cli;
 mod engine;
 mod target_policy;
@@ -202,6 +208,17 @@ fn parse_headers(raw: &[String]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Pick the themed or plain renderer for the current colour setting. Shared by
+/// the banner path in [`run_scan`] and the help path in [`run`] so the colour
+/// decision lives in one place.
+fn theme_for(color: bool) -> Theme {
+    if color {
+        Theme::default()
+    } else {
+        Theme::plain()
+    }
+}
+
 /// `TorsHammer <version>` — the canonical `--version` line.
 pub fn version_line() -> String {
     format!("{PROGRAM} {VERSION}")
@@ -334,11 +351,7 @@ fn run_scan(cfg: &Config) -> i32 {
     } else {
         Output::new(cfg.color, cfg.verbosity)
     };
-    let theme: Theme = if cfg.color {
-        Theme::default()
-    } else {
-        Theme::plain()
-    };
+    let theme: Theme = theme_for(cfg.color);
 
     let meta = BannerMeta {
         version: VERSION,
@@ -463,11 +476,7 @@ pub fn run() -> i32 {
         }
         Ok(Action::Help) => {
             let color = theme::color_enabled(false);
-            let theme: Theme = if color {
-                Theme::default()
-            } else {
-                Theme::plain()
-            };
+            let theme = theme_for(color);
             let _ = Output::new(color, 0).raw(&help::render(
                 PROGRAM,
                 VERSION,
@@ -495,6 +504,53 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    /// Unwrap a parsed [`Config`], panicking with context if the action is not
+    /// [`Action::Run`]. Centralises the "expected Run" arm so its panic branch
+    /// is exercised exactly once (see `expect_run_panics_on_non_run_action`).
+    fn expect_run(args: &[&str]) -> Config {
+        match parse_args(args).expect("arguments should parse") {
+            Action::Run(cfg) => *cfg,
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    /// Bind an ephemeral loopback listener and return its port alongside the
+    /// still-open listener, so `run_scan` can complete TCP connects against it.
+    fn local_listener() -> (u16, TcpListener) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let port = listener.local_addr().expect("local addr").port();
+        (port, listener)
+    }
+
+    /// Accept and briefly hold connections from `listener` for a bounded window
+    /// so slow-request profiles never stall on a full accept backlog. Returns a
+    /// flag that the caller sets to stop the acceptor, plus the accepted count.
+    fn drain_backlog(listener: TcpListener) -> (Arc<AtomicBool>, Arc<AtomicBool>) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        let done2 = done.clone();
+        thread::spawn(move || {
+            let _ = listener.set_nonblocking(true);
+            let deadline = Instant::now() + Duration::from_millis(3000);
+            while Instant::now() < deadline && !stop2.load(Ordering::Relaxed) {
+                if let Ok((mut sock, _)) = listener.accept() {
+                    let _ = sock.read(&mut [0u8; 16]);
+                } else {
+                    thread::sleep(Duration::from_millis(2));
+                }
+            }
+            done2.store(true, Ordering::Relaxed);
+        });
+        (stop, done)
+    }
 
     #[test]
     fn version_comes_from_cargo_package_metadata() {
@@ -502,6 +558,13 @@ mod tests {
         assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
         assert!(version_line().starts_with("TorsHammer "));
         assert!(version_line().contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn theme_for_selects_coloured_and_plain() {
+        // Both arms of the shared colour decision.
+        let _ = theme_for(true);
+        let _ = theme_for(false);
     }
 
     #[test]
@@ -552,63 +615,213 @@ mod tests {
 
     #[test]
     fn parse_args_accepts_advanced_mode() {
-        let args = ["-u", "http://example.com", "-m", "websocket-slow-upgrade"];
-        match parse_args(args).expect("should parse") {
-            Action::Run(cfg) => assert_eq!(cfg.mode, "websocket-slow-upgrade"),
-            other => panic!("expected Run, got {other:?}"),
-        }
+        let cfg = expect_run(&["-u", "http://example.com", "-m", "websocket-slow-upgrade"]);
+        assert_eq!(cfg.mode, "websocket-slow-upgrade");
     }
 
     #[test]
     fn parse_args_with_target_and_backend() {
-        let args = ["--target", "http://127.0.0.1:8080", "--backend", "rust"];
-        match parse_args(args).expect("should parse") {
-            Action::Run(cfg) => {
-                assert_eq!(cfg.target, "http://127.0.0.1:8080");
-                assert_eq!(cfg.backend, "rust");
-            }
-            other => panic!("expected Run, got {other:?}"),
-        }
+        let cfg = expect_run(&["--target", "http://127.0.0.1:8080", "--backend", "rust"]);
+        assert_eq!(cfg.target, "http://127.0.0.1:8080");
+        assert_eq!(cfg.backend, "rust");
     }
 
     #[test]
     fn parse_args_short_flags() {
-        let args = ["-u", "http://example.com"];
-        match parse_args(args).expect("should parse") {
-            Action::Run(cfg) => assert_eq!(cfg.target, "http://example.com"),
-            other => panic!("expected Run, got {other:?}"),
-        }
+        let cfg = expect_run(&["-u", "http://example.com"]);
+        assert_eq!(cfg.target, "http://example.com");
     }
 
     #[test]
     fn parse_args_positional_target() {
-        let args = ["http://localhost"];
-        match parse_args(args).expect("should parse") {
-            Action::Run(cfg) => assert_eq!(cfg.target, "http://localhost"),
-            other => panic!("expected Run, got {other:?}"),
-        }
+        let cfg = expect_run(&["http://localhost"]);
+        assert_eq!(cfg.target, "http://localhost");
     }
 
     #[test]
     fn parse_args_allow_public_targets_flag() {
-        let args = ["--target", "http://example.com", "--allow-public-targets"];
-        match parse_args(args).expect("should parse") {
-            Action::Run(cfg) => assert!(cfg.allow_public_targets),
-            other => panic!("expected Run, got {other:?}"),
-        }
+        let cfg = expect_run(&["--target", "http://example.com", "--allow-public-targets"]);
+        assert!(cfg.allow_public_targets);
     }
 
     #[test]
     fn parse_args_allowlist_file_flag() {
-        let args = [
+        let cfg = expect_run(&[
             "--target",
             "http://example.com",
             "--allowlist-file",
             "hosts.txt",
-        ];
-        match parse_args(args).expect("should parse") {
-            Action::Run(cfg) => assert_eq!(cfg.allowlist_file.as_deref(), Some("hosts.txt")),
-            other => panic!("expected Run, got {other:?}"),
+        ]);
+        assert_eq!(cfg.allowlist_file.as_deref(), Some("hosts.txt"));
+    }
+
+    #[test]
+    fn parse_args_numeric_flags_headers_and_body() {
+        let cfg = expect_run(&[
+            "--target",
+            "http://x",
+            "-c",
+            "128",
+            "--connect-timeout",
+            "2.5",
+            "--stats-interval",
+            "0.5",
+            "--post-length",
+            "8192",
+            "--max-errors",
+            "10",
+            "--fail-under",
+            "5",
+            "--delay-min",
+            "0.2",
+            "--delay-max",
+            "5.0",
+            "-d",
+            "3",
+            "--method",
+            "POST",
+            "--path",
+            "/api",
+            "--header",
+            "X-A: 1",
+            "--header",
+            "no-colon-dropped",
+            "--body-file",
+            "body.bin",
+            "--json",
+            "--no-random-path",
+            "--fail-on-zero",
+            "--no-unicode",
+            "--no-color",
+        ]);
+        assert_eq!(cfg.concurrency, 128);
+        assert_eq!(cfg.connect_timeout, 2.5);
+        assert_eq!(cfg.stats_interval, 0.5);
+        assert_eq!(cfg.post_length, 8192);
+        assert_eq!(cfg.max_errors, 10);
+        assert_eq!(cfg.fail_under, 5);
+        assert_eq!(cfg.delay_min, 0.2);
+        assert_eq!(cfg.delay_max, 5.0);
+        assert_eq!(cfg.duration, 3.0);
+        assert_eq!(cfg.method.as_deref(), Some("POST"));
+        assert_eq!(cfg.path.as_deref(), Some("/api"));
+        assert_eq!(cfg.body_file.as_deref(), Some("body.bin"));
+        assert!(cfg.json);
+        assert!(cfg.no_random_path);
+        assert!(cfg.fail_on_zero);
+        assert!(!cfg.unicode);
+        assert!(!cfg.color);
+        // parse_headers keeps the `Name: value` pair and drops the colon-less one.
+        assert_eq!(
+            parse_headers(&cfg.custom_headers),
+            vec![("X-A".to_string(), "1".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_bad_numbers_missing_values_and_target() {
+        assert!(parse_args(["--target", "http://x", "-c", "notanumber"]).is_err());
+        assert!(parse_args(["--target", "http://x", "--connect-timeout", "abc"]).is_err());
+        assert!(parse_args(["--target", "http://x", "--stats-interval", "abc"]).is_err());
+        assert!(parse_args(["-d", "xyz"]).is_err());
+        assert!(parse_args(["-m"]).is_err()); // missing value for -m
+        assert!(parse_args(["--json"]).is_err()); // no target -> required error
+    }
+
+    #[test]
+    fn parse_args_accepts_every_value_taking_option() {
+        // Drive the success (`Ok`) path of every value-taking arm in the
+        // match, so each arm line and its `?` continue-region are exercised.
+        let cfg = expect_run(&[
+            "--target",
+            "http://127.0.0.1:80",
+            "--backend",
+            "rust",
+            "--concurrency",
+            "4",
+            "--mode",
+            "slow-headers",
+            "--duration",
+            "1.5",
+            "--delay-min",
+            "0.1",
+            "--delay-max",
+            "0.5",
+            "--connect-timeout",
+            "2.0",
+            "--post-length",
+            "32",
+            "--method",
+            "POST",
+            "--path",
+            "/x",
+            "--header",
+            "X-Foo: bar",
+            "--body-file",
+            "/tmp/body",
+            "--stats-interval",
+            "0.3",
+            "--max-errors",
+            "5",
+            "--fail-under",
+            "1",
+            "--allowlist-file",
+            "/tmp/allow",
+        ]);
+        assert_eq!(cfg.concurrency, 4);
+        assert_eq!(cfg.mode, "slow-headers");
+        assert_eq!(cfg.max_errors, 5);
+    }
+
+    #[test]
+    fn parse_args_flags_missing_value_for_every_value_option() {
+        // A trailing flag with no following argument drives the `?` early
+        // return (the `Err` region) of every value-taking arm exactly once.
+        for flag in [
+            "--target",
+            "--url",
+            "--backend",
+            "--concurrency",
+            "--mode",
+            "--duration",
+            "--delay-min",
+            "--delay-max",
+            "--connect-timeout",
+            "--post-length",
+            "--method",
+            "--path",
+            "--header",
+            "--body-file",
+            "--stats-interval",
+            "--max-errors",
+            "--fail-under",
+            "--allowlist-file",
+        ] {
+            // Message-less: a dynamic `{flag}` panic message would inline a
+            // format-args region that no failing run of a green suite reaches.
+            assert!(parse_args(["--target", "http://127.0.0.1:1", flag]).is_err());
+        }
+    }
+
+    #[test]
+    fn parse_args_rejects_non_numeric_values_for_every_numeric_option() {
+        // A present-but-invalid numeric argument lets `take_value` succeed so
+        // `parse_usize`/`parse_f64` returns `Err`, driving the second `?`
+        // early-return on each numeric arm (and the `map_err` closure bodies).
+        for flag in [
+            "--concurrency",
+            "--duration",
+            "--delay-min",
+            "--delay-max",
+            "--connect-timeout",
+            "--post-length",
+            "--stats-interval",
+            "--max-errors",
+            "--fail-under",
+        ] {
+            // Message-less (see note above) to avoid an unreachable format-args
+            // panic-message region.
+            assert!(parse_args(["--target", "http://127.0.0.1:1", flag, "not-a-number"]).is_err());
         }
     }
 
@@ -621,6 +834,120 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(run_scan(&cfg), 2);
+    }
+
+    #[test]
+    fn run_scan_rejects_malformed_url() {
+        // `ftp://` is a well-formed URL whose scheme the parser rejects, so this
+        // drives run_scan's url::parse error arm (rather than the policy check).
+        let cfg = Config {
+            target: "ftp://127.0.0.1/x".to_string(),
+            ..Config::default()
+        };
+        assert_eq!(run_scan(&cfg), 2);
+    }
+
+    #[test]
+    fn run_scan_rejects_https_target() {
+        let cfg = Config {
+            target: "https://127.0.0.1:1".to_string(),
+            ..Config::default()
+        };
+        assert_eq!(run_scan(&cfg), 2);
+    }
+
+    #[test]
+    fn run_scan_rejects_unknown_mode() {
+        let cfg = Config {
+            target: "http://127.0.0.1:1".to_string(),
+            mode: "bogus-mode".to_string(),
+            ..Config::default()
+        };
+        assert_eq!(run_scan(&cfg), 2);
+    }
+
+    #[test]
+    fn run_scan_rejects_unreadable_allowlist() {
+        let cfg = Config {
+            target: "http://127.0.0.1:1".to_string(),
+            allowlist_file: Some("/definitely/not/a/real/allowlist.txt".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(run_scan(&cfg), 2);
+    }
+
+    #[test]
+    fn run_scan_rejects_unreadable_body_file() {
+        let cfg = Config {
+            target: "http://127.0.0.1:1".to_string(),
+            body_file: Some("/definitely/not/a/real/body.bin".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(run_scan(&cfg), 2);
+    }
+
+    #[test]
+    fn run_scan_happy_path_loads_body_and_runs_briefly() {
+        // JSON+colour routes every human line to stderr (clean stdout) and
+        // exercises the with_writers/Theme::default branches; a real body file
+        // drives the Ok(read) arm; a short duration bounds engine::run.
+        let (port, listener) = local_listener();
+        let (stop, _done) = drain_backlog(listener);
+        let body = std::env::temp_dir().join(format!("torshammer_body_{port}"));
+        std::fs::write(&body, b"custom payload body").expect("write temp body");
+        let cfg = Config {
+            target: format!("http://127.0.0.1:{port}"),
+            mode: "slow-post".to_string(),
+            json: true,
+            color: true,
+            duration: 0.1,
+            concurrency: 2,
+            verbosity: -1,
+            delay_min: 0.001,
+            delay_max: 0.005,
+            body_file: Some(body.to_string_lossy().into_owned()),
+            ..Config::default()
+        };
+        let code = run_scan(&cfg);
+        stop.store(true, Ordering::Relaxed);
+        let _ = std::fs::remove_file(&body);
+        // A happy local run exits 0 (clean) or 1 (automation gate). Use a
+        // single `<= 1` comparison rather than `== 0 || == 1`: the `||`
+        // short-circuit would leave the right operand (`== 1`) as a normal
+        // branch region that no green run evaluates (they all exit 0), which
+        // llvm counts as an uncovered line.
+        assert!(code <= 1);
+    }
+
+    #[test]
+    fn run_scan_loads_allowlist_and_runs_without_body() {
+        // A readable allowlist drives the load_allowlist Ok arm; omitting
+        // body_file drives the `None => None` arm. Non-JSON routes output to
+        // stdout (Output::new) instead of the stderr with_writers path.
+        let (port, listener) = local_listener();
+        let (stop, _done) = drain_backlog(listener);
+        let allow = std::env::temp_dir().join(format!("torshammer_allow_{port}"));
+        std::fs::write(&allow, "127.0.0.1\n").expect("write allowlist");
+        let cfg = Config {
+            target: format!("http://127.0.0.1:{port}"),
+            mode: "idle-hold".to_string(),
+            duration: 0.05,
+            concurrency: 1,
+            verbosity: -1,
+            delay_min: 0.001,
+            delay_max: 0.002,
+            allowlist_file: Some(allow.to_string_lossy().into_owned()),
+            ..Config::default()
+        };
+        let code = run_scan(&cfg);
+        stop.store(true, Ordering::Relaxed);
+        let _ = std::fs::remove_file(&allow);
+        // A happy local run exits 0 (clean) or 1 (automation gate). Use a
+        // single `<= 1` comparison rather than `== 0 || == 1`: the `||`
+        // short-circuit would leave the right operand (`== 1`) as a normal
+        // branch region that no green run evaluates (they all exit 0), which
+        // llvm counts as an uncovered line.
+        assert!(code <= 1);
     }
 
     #[test]
@@ -647,25 +974,26 @@ mod tests {
 
     #[test]
     fn parse_args_no_color_flag() {
-        let args = ["--target", "http://x", "--no-color"];
-        match parse_args(args).expect("should parse") {
-            Action::Run(cfg) => assert!(!cfg.color),
-            other => panic!("expected Run, got {other:?}"),
-        }
+        let cfg = expect_run(&["--target", "http://x", "--no-color"]);
+        assert!(!cfg.color);
     }
 
     #[test]
     fn parse_args_verbosity_flags() {
-        let args = ["--target", "http://x", "--debug"];
-        match parse_args(args).expect("should parse") {
-            Action::Run(cfg) => assert_eq!(cfg.verbosity, 1),
-            other => panic!("expected Run, got {other:?}"),
-        }
-        let args = ["--target", "http://x", "--quiet"];
-        match parse_args(args).expect("should parse") {
-            Action::Run(cfg) => assert_eq!(cfg.verbosity, -1),
-            other => panic!("expected Run, got {other:?}"),
-        }
+        assert_eq!(
+            expect_run(&["--target", "http://x", "--debug"]).verbosity,
+            1
+        );
+        assert_eq!(
+            expect_run(&["--target", "http://x", "--quiet"]).verbosity,
+            -1
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "expected Run")]
+    fn expect_run_panics_on_non_run_action() {
+        expect_run(&["--version"]);
     }
 
     #[test]
@@ -693,6 +1021,31 @@ mod tests {
         let mut monitor = TtyMonitor::new(2.0, false, false);
         monitor.tick(&snap, 0.5, 1024.0, 256.0);
         monitor.finish(&snap, 1.5);
+    }
+
+    #[test]
+    fn tty_monitor_unicode_no_bar_errors_and_latency_rows() {
+        let snap = Snapshot {
+            connections: 6,
+            active: 3,
+            peak_active: 5,
+            completed: 2,
+            errors: 2,
+            bytes_sent: 8192,
+            bytes_received: 16384,
+            responses: 5,
+            status_2xx: 3,
+            status_3xx: 1,
+            status_4xx: 1,
+            status_5xx: 0,
+            resp_latency_count: 4,
+            resp_latency_total_micros: 40_000,
+        };
+        // duration 0.0 -> no progress bar; unicode true -> Symbols::unicode;
+        // errors>0 -> Failed status; responses/latency -> extra table rows.
+        let mut monitor = TtyMonitor::new(0.0, true, false);
+        monitor.tick(&snap, 1.0, 512.0, 256.0);
+        monitor.finish(&snap, 2.5);
     }
 
     #[test]

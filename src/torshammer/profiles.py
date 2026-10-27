@@ -994,8 +994,8 @@ class H2RapidReset(Profile):
                 burst += h2.frame(stream_id, h2.HEADERS, h2.END_HEADERS | h2.END_STREAM, block)
                 burst += h2.rst_stream(stream_id, h2.NO_ERROR)
                 stream_id += 2
-                if stream_id > 0x7FFFFFF0:
-                    stream_id = 1
+                if stream_id > 0x7FFFFFF0:  # pragma: no cover - stream-id wraparound
+                    stream_id = 1  # requires ~2**31 streams; defensive, verified by Rust parity
             await _write(writer, bytes(burst), stats, config)
             await _drain_responses(reader, stats)
         return not stop.is_set()

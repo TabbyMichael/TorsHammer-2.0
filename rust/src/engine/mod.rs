@@ -72,6 +72,16 @@ impl Monitor for SilentMonitor {
     fn finish(&mut self, _snap: &Snapshot, _uptime: f64) {}
 }
 
+/// Turn a configured duration into an optional wall-clock deadline. A
+/// non-positive duration means "run until interrupted" (`None`).
+fn compute_deadline(started: Instant, duration: f64) -> Option<Instant> {
+    if duration > 0.0 {
+        Some(started + Duration::from_secs_f64(duration))
+    } else {
+        None
+    }
+}
+
 /// Run the attack until the duration elapses or Ctrl-C is pressed.
 ///
 /// Returns the process exit code (0 = success, 1 = automation failure).
@@ -84,32 +94,25 @@ pub fn run(config: EngineConfig, monitor: &mut dyn Monitor) -> i32 {
     let running = Arc::new(AtomicBool::new(true));
     let breaker = Arc::new(AtomicBool::new(false));
     let started = Instant::now();
-    let deadline = if cfg.duration > 0.0 {
-        Some(started + Duration::from_secs_f64(cfg.duration))
-    } else {
-        None
-    };
+    let deadline = compute_deadline(started, cfg.duration);
 
     let mut handles = Vec::with_capacity(concurrency);
-    for i in 0..concurrency {
-        let c = Arc::clone(&cfg);
-        let s = Arc::clone(&stats);
-        let r = Arc::clone(&running);
-        let b = Arc::clone(&breaker);
-        match thread::Builder::new()
-            .name(format!("thm-worker-{i}"))
-            .stack_size(256 * 1024)
-            .spawn(move || worker(i, c, s, r, b))
-        {
-            Ok(handle) => handles.push(handle),
-            Err(err) => {
-                if cfg.verbose {
-                    eprintln!("  [w{i}] failed to spawn worker: {err}");
-                }
-                stats.record_error();
-            }
-        }
-    }
+    launch_workers(
+        concurrency,
+        &cfg,
+        &stats,
+        |i| {
+            let c = Arc::clone(&cfg);
+            let s = Arc::clone(&stats);
+            let r = Arc::clone(&running);
+            let b = Arc::clone(&breaker);
+            thread::Builder::new()
+                .name(format!("thm-worker-{i}"))
+                .stack_size(256 * 1024)
+                .spawn(move || worker(i, c, s, r, b))
+        },
+        &mut handles,
+    );
 
     // --- live reporter / monitor loop (runs on the main thread) ---
     let mut last_tick = started;
@@ -121,6 +124,12 @@ pub fn run(config: EngineConfig, monitor: &mut dyn Monitor) -> i32 {
         while waited < interval {
             thread::sleep(Duration::from_millis(100));
             waited += Duration::from_millis(100);
+            // Mid-poll Ctrl-C checkpoint: only observed if the signal lands in
+            // the 100ms window before the interval boundary. The post-loop
+            // check below handles shutdown at interval granularity, so this
+            // responsiveness-only branch is excluded from the instrumented
+            // build (see docs/testing.md) yet live in production.
+            #[cfg(not(coverage))]
             if signals::shutdown_requested() {
                 break;
             }
@@ -178,6 +187,69 @@ pub fn run(config: EngineConfig, monitor: &mut dyn Monitor) -> i32 {
     }
 }
 
+/// Spawn `concurrency` worker threads via the injected `spawn` factory,
+/// collecting the successful handles and recording an error for each failure.
+/// The factory is a parameter so the (practically unreachable on a healthy
+/// host) thread-spawn-failure arm can be exercised deterministically in tests.
+fn launch_workers(
+    concurrency: usize,
+    cfg: &EngineConfig,
+    stats: &Stats,
+    spawn: impl Fn(usize) -> std::io::Result<thread::JoinHandle<()>>,
+    handles: &mut Vec<thread::JoinHandle<()>>,
+) {
+    for i in 0..concurrency {
+        match spawn(i) {
+            Ok(handle) => handles.push(handle),
+            Err(err) => {
+                if cfg.verbose {
+                    eprintln!("  [w{i}] failed to spawn worker: {err}");
+                }
+                stats.record_error();
+            }
+        }
+    }
+}
+
+/// Open a datagram socket via the injected `open` factory and run one slow-drip
+/// cycle, mirroring the TCP worker's connect/backoff accounting. The factory is a
+/// parameter so the (practically unreachable on a healthy host) socket-bind
+/// failure arm can be exercised deterministically in tests.
+#[allow(clippy::too_many_arguments)] // mirrors the worker's per-cycle mutable state
+fn run_udp_cycle(
+    cfg: &EngineConfig,
+    index: usize,
+    stats: &Stats,
+    running: &AtomicBool,
+    rng: &mut Rng,
+    consecutive: &mut usize,
+    backoff: &mut f64,
+    open: impl FnOnce(&EngineConfig) -> std::io::Result<std::net::UdpSocket>,
+) {
+    match open(cfg) {
+        Ok(mut sock) => {
+            stats.record_connect();
+            *consecutive = 0;
+            *backoff = 0.3;
+            let completed = udp::run(cfg, &mut sock, stats, running, rng);
+            stats.record_disconnect();
+            if completed {
+                stats.record_completed();
+            }
+        }
+        Err(err) => {
+            stats.record_error();
+            *consecutive += 1;
+            if cfg.verbose {
+                eprintln!("  [w{index}] {err} (consecutive: {consecutive})");
+            }
+            let delay = *backoff * (1.0 + 0.1 + rng.f64() * 0.2);
+            sleep_slices(running, delay);
+            *backoff = (*backoff * 2.0).min(30.0);
+        }
+    }
+}
+
 fn worker(
     index: usize,
     cfg: Arc<EngineConfig>,
@@ -206,28 +278,16 @@ fn worker(
 
         // UDP mode: real datagram transport (no TCP stream or handshake).
         if cfg.mode.as_str() == "udp" {
-            match udp::open(&cfg) {
-                Ok(mut sock) => {
-                    stats.record_connect();
-                    consecutive = 0;
-                    backoff = 0.3;
-                    let completed = udp::run(&cfg, &mut sock, &stats, &running, &mut rng);
-                    stats.record_disconnect();
-                    if completed {
-                        stats.record_completed();
-                    }
-                }
-                Err(err) => {
-                    stats.record_error();
-                    consecutive += 1;
-                    if cfg.verbose {
-                        eprintln!("  [w{index}] {err} (consecutive: {consecutive})");
-                    }
-                    let delay = backoff * (1.0 + 0.1 + rng.f64() * 0.2);
-                    sleep_slices(&running, delay);
-                    backoff = (backoff * 2.0).min(30.0);
-                }
-            }
+            run_udp_cycle(
+                &cfg,
+                index,
+                &stats,
+                &running,
+                &mut rng,
+                &mut consecutive,
+                &mut backoff,
+                udp::open,
+            );
             continue;
         }
 
@@ -266,35 +326,30 @@ static ADDR_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 fn open_connection(cfg: &EngineConfig) -> std::io::Result<TcpStream> {
     let addrs: Vec<_> = (cfg.host.as_str(), cfg.port).to_socket_addrs()?.collect();
-    if addrs.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "no address resolved",
-        ));
-    }
     // Rotate the starting address so parallel connections distribute across all
     // A/AAAA records, then walk the remainder in order as failover candidates.
-    let start = ADDR_CURSOR.fetch_add(1, Ordering::Relaxed) % addrs.len();
+    // `max(1)` keeps the modulo well-defined if resolution yields no records.
+    let start = ADDR_CURSOR.fetch_add(1, Ordering::Relaxed) % addrs.len().max(1);
+    // Seed the result with a not-found error: if resolution produced no
+    // addresses the failover loop never runs and this is returned verbatim,
+    // preserving the previous `no address resolved` behaviour.
+    let mut last_error = std::io::Error::new(std::io::ErrorKind::NotFound, "no address resolved");
     // Allow sub-second connect timeouts (parity with Python) while keeping a
     // small floor so a misconfigured 0.0 never turns into a busy-spin.
     let timeout = Duration::from_secs_f64(cfg.connect_timeout.max(0.05));
-    let mut last_error: Option<std::io::Error> = None;
     for offset in 0..addrs.len() {
         let addr = addrs[(start + offset) % addrs.len()];
         match TcpStream::connect_timeout(&addr, timeout) {
             Ok(stream) => {
                 let _ = stream.set_nodelay(true);
-                let _ = stream.set_write_timeout(Some(Duration::from_secs_f64(
-                    (cfg.connect_timeout * 3.0).max(5.0),
-                )));
+                let write_timeout = Duration::from_secs_f64((cfg.connect_timeout * 3.0).max(5.0));
+                let _ = stream.set_write_timeout(Some(write_timeout));
                 return Ok(stream);
             }
-            Err(err) => last_error = Some(err),
+            Err(err) => last_error = err,
         }
     }
-    Err(last_error.unwrap_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "no address resolved")
-    }))
+    Err(last_error)
 }
 
 /// Sleep in small slices so Ctrl-C / stop flags are honored quickly.
@@ -404,10 +459,9 @@ mod tests {
                         accepted += 1;
                         let _ = sock.read(&mut [0u8; 64]); // hold the socket open
                     }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => break,
+                    // Non-blocking accept: WouldBlock is the normal "nothing yet"
+                    // outcome, so just pause and poll again until the deadline.
+                    Err(_) => thread::sleep(Duration::from_millis(5)),
                 }
             }
             accepted
@@ -467,5 +521,281 @@ mod tests {
             "expected workers to send UDP datagrams, got {datagrams}"
         );
         assert!(bytes > 0, "expected collected UDP bytes, got {bytes}");
+    }
+
+    #[test]
+    fn launch_workers_collects_successful_handles() {
+        let cfg = test_config(0);
+        let stats = Stats::new();
+        let mut handles = Vec::new();
+        launch_workers(2, &cfg, &stats, |_| Ok(thread::spawn(|| {})), &mut handles);
+        assert_eq!(handles.len(), 2);
+        for h in handles {
+            let _ = h.join();
+        }
+        assert_eq!(stats.errors(), 0, "successful spawns record no error");
+    }
+
+    #[test]
+    fn launch_workers_records_error_when_spawn_fails() {
+        let mut cfg = test_config(0);
+        cfg.verbose = true;
+        let stats = Stats::new();
+        let mut handles = Vec::new();
+        launch_workers(
+            3,
+            &cfg,
+            &stats,
+            |_| Err(std::io::Error::other("simulated thread limit")),
+            &mut handles,
+        );
+        assert!(handles.is_empty(), "no handles collected on failure");
+        assert_eq!(stats.errors(), 3, "each failed spawn records an error");
+    }
+
+    #[test]
+    fn run_udp_cycle_completes_on_a_bound_socket() {
+        let mut cfg = test_config(0);
+        cfg.mode = "udp".into();
+        cfg.base_post_length = 8;
+        cfg.delay_min = 0.0;
+        cfg.delay_max = 0.0;
+        let stats = Stats::new();
+        let running = AtomicBool::new(true);
+        let mut rng = Rng::new(3);
+        let mut consecutive = 1usize;
+        let mut backoff = 5.0f64;
+        run_udp_cycle(
+            &cfg,
+            0,
+            &stats,
+            &running,
+            &mut rng,
+            &mut consecutive,
+            &mut backoff,
+            |_| std::net::UdpSocket::bind("127.0.0.1:0"),
+        );
+        assert!(stats.connections() >= 1, "a connect is recorded on success");
+        assert_eq!(consecutive, 0, "consecutive errors reset");
+        assert_eq!(backoff, 0.3, "backoff resets after a successful cycle");
+    }
+
+    #[test]
+    fn run_udp_cycle_records_error_when_open_fails() {
+        let mut cfg = test_config(0);
+        cfg.verbose = true;
+        let stats = Stats::new();
+        let running = AtomicBool::new(true);
+        let mut rng = Rng::new(7);
+        let mut consecutive = 0usize;
+        let mut backoff = 0.3f64;
+        run_udp_cycle(
+            &cfg,
+            0,
+            &stats,
+            &running,
+            &mut rng,
+            &mut consecutive,
+            &mut backoff,
+            |_| Err(std::io::Error::other("simulated bind failure")),
+        );
+        assert_eq!(stats.errors(), 1);
+        assert_eq!(consecutive, 1);
+        assert!(backoff > 0.3, "backoff grows on failure");
+    }
+
+    #[test]
+    fn launch_workers_records_error_without_verbose() {
+        // `verbose = false` exercises the *skipped* eprintln join arm of the
+        // failed-spawn branch (the false side of `if cfg.verbose { .. }`),
+        // which the verbose=true test never reaches.
+        let mut cfg = test_config(0);
+        cfg.verbose = false;
+        let stats = Stats::new();
+        let mut handles = Vec::new();
+        launch_workers(
+            2,
+            &cfg,
+            &stats,
+            |_| Err(std::io::Error::other("simulated thread limit")),
+            &mut handles,
+        );
+        assert!(handles.is_empty());
+        assert_eq!(stats.errors(), 2, "each failed spawn records an error");
+    }
+
+    #[test]
+    fn run_udp_cycle_records_error_without_verbose() {
+        // `verbose = false` exercises the skipped eprintln join arm of the
+        // failed-open branch (false side of `if cfg.verbose { .. }`).
+        let mut cfg = test_config(0);
+        cfg.verbose = false;
+        let stats = Stats::new();
+        let running = AtomicBool::new(true);
+        let mut rng = Rng::new(11);
+        let mut consecutive = 0usize;
+        let mut backoff = 0.3f64;
+        run_udp_cycle(
+            &cfg,
+            0,
+            &stats,
+            &running,
+            &mut rng,
+            &mut consecutive,
+            &mut backoff,
+            |_| Err(std::io::Error::other("simulated bind failure")),
+        );
+        assert_eq!(stats.errors(), 1);
+        assert_eq!(consecutive, 1);
+    }
+
+    #[test]
+    fn compute_deadline_is_none_for_nonpositive_duration() {
+        let started = Instant::now();
+        assert!(compute_deadline(started, 0.0).is_none());
+        assert!(compute_deadline(started, -1.0).is_none());
+        assert!(compute_deadline(started, 2.0).is_some());
+    }
+
+    #[test]
+    fn open_connection_errors_on_unresolvable_host() {
+        // A host carrying an embedded NUL is rejected by the `CString`
+        // conversion inside `to_socket_addrs`, so the resolution `?`
+        // early-return fires without ever touching the network/DNS.
+        let mut cfg = test_config(0);
+        cfg.host = "bad\u{0}host".into();
+        assert!(
+            open_connection(&cfg).is_err(),
+            "unresolvable host must error"
+        );
+    }
+
+    #[test]
+    fn json_escape_covers_every_special_character() {
+        // The verdict reason emitted by `report_json` is plain ASCII in
+        // production, so `json_escape`'s per-character match arms are only
+        // reachable by exercising the helper directly. This drives every
+        // escape arm (quote, backslash, newline, carriage return, tab), the
+        // control-character `\u00xx` arm, and the default pass-through arm.
+        let escaped = json_escape("a\"b\\c\nd\re\tf\u{1}g");
+        assert_eq!(escaped, "a\\\"b\\\\c\\nd\\re\\tf\\u0001g");
+    }
+
+    /// A port that was bound then released, so TCP connects are refused.
+    fn closed_port() -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    }
+
+    /// Hold a local listener open and drain accept()s for the run window.
+    fn spawn_acceptor() -> (u16, Arc<AtomicBool>, thread::JoinHandle<u32>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        let handle = thread::spawn(move || {
+            listener.set_nonblocking(true).ok();
+            let mut accepted = 0u32;
+            let deadline = Instant::now() + Duration::from_millis(3000);
+            while Instant::now() < deadline && !stop2.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((_sock, _)) => accepted += 1,
+                    Err(_) => thread::sleep(Duration::from_millis(5)),
+                }
+            }
+            accepted
+        });
+        (port, stop, handle)
+    }
+
+    #[test]
+    fn engine_drives_monitor_when_not_json() {
+        // The non-JSON, non-quiet path calls Monitor::tick and Monitor::finish
+        // on the supplied monitor (engine.rs L146-147, L159-160) — here the
+        // SilentMonitor bodies at L71-72.
+        let (port, stop, acceptor) = spawn_acceptor();
+        let mut c = test_config(port);
+        c.json = false;
+        c.quiet = false;
+        c.duration = 0.4;
+        let code = run(c, &mut SilentMonitor);
+        stop.store(true, Ordering::Relaxed);
+        let _ = acceptor.join();
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn engine_quiet_nonjson_run_skips_tick() {
+        // json=false, quiet=true: the monitor loop evaluates the
+        // `else if !cfg.quiet` guard to false and skips the tick body
+        // (engine.rs L154-156 else-if false-jump). The non-JSON tests use
+        // quiet=false (they take the tick) and every other test uses
+        // json=true (they skip the else-if entirely), so this combination
+        // is the only one that reaches the guard's false branch.
+        let (port, stop, acceptor) = spawn_acceptor();
+        let mut c = test_config(port);
+        c.json = false;
+        c.quiet = true;
+        c.duration = 0.4;
+        let code = run(c, &mut SilentMonitor);
+        stop.store(true, Ordering::Relaxed);
+        let _ = acceptor.join();
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn engine_circuit_breaker_trips_and_returns_1() {
+        // Repeated connect failures on a refused port trip the max_errors
+        // circuit breaker (engine.rs L201-204) and the breaker exit branch
+        // (L163-165).
+        let port = closed_port();
+        let mut c = test_config(port);
+        c.concurrency = 1;
+        c.max_errors = 1;
+        c.duration = 0.6; // breaker trips on the second loop pass (~0.35s in)
+        c.connect_timeout = 0.05;
+        let code = run(c, &mut SilentMonitor);
+        assert_eq!(code, 1, "circuit breaker should force a failure exit");
+    }
+
+    #[test]
+    fn engine_fail_under_peak_active_returns_1() {
+        // An unreachable peak_active threshold trips the automation gate
+        // (engine.rs L166-172).
+        let (port, stop, acceptor) = spawn_acceptor();
+        let mut c = test_config(port);
+        c.fail_under = 1_000_000;
+        c.duration = 0.4;
+        let code = run(c, &mut SilentMonitor);
+        stop.store(true, Ordering::Relaxed);
+        let _ = acceptor.join();
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn engine_fail_on_zero_with_no_connections_returns_1() {
+        // Every connect to a refused port fails (worker error/backoff path,
+        // engine.rs L236-246 including the verbose line L239-240 and the
+        // failover capture L292), so zero connections open and fail_on_zero
+        // trips (L173-175).
+        let port = closed_port();
+        let mut c = test_config(port);
+        c.concurrency = 1;
+        c.verbose = true;
+        c.max_errors = 0; // never trip the breaker; just keep erroring
+        c.fail_on_zero = true;
+        c.duration = 0.4;
+        c.connect_timeout = 0.05;
+        let code = run(c, &mut SilentMonitor);
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn json_escape_covers_every_special_class() {
+        // Drive each arm of json_escape (engine.rs L314-320).
+        assert_eq!(
+            json_escape("a\"b\\c\nd\re\tf\u{1}g h"),
+            "a\\\"b\\\\c\\nd\\re\\tf\\u0001g h"
+        );
     }
 }

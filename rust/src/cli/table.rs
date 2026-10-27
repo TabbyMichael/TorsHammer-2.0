@@ -164,14 +164,15 @@ fn shrink(widths: &mut [usize], width_limit: usize) {
         if current <= budget {
             break;
         }
-        let Some((idx, _)) = widths
+        // `current > budget >= 1` guarantees at least one positive width, and
+        // `cols > 0` was checked above, so `max_by_key` is always `Some` and its
+        // column width is > 0. The previous `filter(w > 0)` + let-else `break`
+        // arm could therefore never fire and was dropped as dead.
+        let (idx, _) = widths
             .iter()
             .enumerate()
-            .filter(|(_, w)| **w > 0)
             .max_by_key(|(_, w)| **w)
-        else {
-            break;
-        };
+            .expect("non-empty widths with a positive column");
         widths[idx] -= 1;
     }
 }
@@ -261,6 +262,41 @@ mod tests {
         assert_eq!(fit("abcdef", 4, "\u{2026}"), "abc\u{2026}");
         assert_eq!(fit("abc", 5, "..."), "abc");
         assert_eq!(fit("", 5, "..."), "");
+    }
+
+    #[test]
+    fn fit_edge_widths() {
+        // Zero width yields an empty cell (table.rs L108-109); a width that
+        // cannot hold any content before the mark emits a trimmed ellipsis
+        // (keep == 0 path, L117-118).
+        assert_eq!(fit("abcdef", 0, "..."), "");
+        assert_eq!(fit("abcdef", 3, "..."), "...");
+        assert_eq!(fit("abcdef", 2, "..."), "..");
+    }
+
+    #[test]
+    fn shrink_degenerate_budgets_zero_or_return() {
+        // width_limit == 0 short-circuits (table.rs L142-143); a budget that
+        // collapses to zero after gaps zeroes every column (L147-149).
+        let mut w = vec![3usize, 4];
+        shrink(&mut w, 0);
+        assert_eq!(w, vec![3, 4]); // untouched
+
+        let mut w = vec![5usize, 5, 5];
+        shrink(&mut w, 4); // 3 cols -> gaps 4 -> budget 0
+        assert_eq!(w, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn shrink_greedy_pass_drops_widest_columns() {
+        // Proportional scaling floors each column to >= 1, which can exceed a
+        // tiny budget; the greedy loop then shaves the widest columns until it
+        // fits (table.rs L162-166, L167-171, L175).
+        let mut w = vec![10usize, 1];
+        shrink(&mut w, 3); // 2 cols -> gaps 2 -> budget 1
+                           // max_by_key keeps the right-most of tied widest columns, shaving one.
+        assert_eq!(w, vec![1, 0]);
+        assert!(w.iter().sum::<usize>() <= 1);
     }
 
     #[test]

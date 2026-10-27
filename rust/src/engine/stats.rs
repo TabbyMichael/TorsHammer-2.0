@@ -410,4 +410,57 @@ mod tests {
         assert_eq!(verdict, "LIKELY_VULNERABLE");
         assert!(reason.contains("5xx"));
     }
+
+    #[test]
+    fn parse_status_codes_skips_http_token_without_digit() {
+        // "HTTP/" immediately followed by a non-digit falls through the
+        // version-digit guard (stats.rs L28/L48) and tallies nothing.
+        assert!(parse_status_codes(b"HTTP/x 200 OK").is_empty());
+    }
+
+    #[test]
+    fn status_other_bucket_captures_unclassified_codes() {
+        // A 1xx response is neither 2xx..5xx, so it lands in status_other
+        // (the `_ =>` arm at stats.rs L177).
+        let stats = Stats::new();
+        stats.record_response_bytes(b"HTTP/1.1 100 Continue\r\n");
+        assert_eq!(stats.responses(), 1);
+        assert_eq!(stats.status_2xx(), 0);
+    }
+
+    #[test]
+    fn record_error_increments_error_counter() {
+        let stats = Stats::default();
+        assert_eq!(stats.errors(), 0);
+        stats.record_error();
+        stats.record_error();
+        assert_eq!(stats.errors(), 2);
+    }
+
+    #[test]
+    fn snapshot_mean_latency_handles_present_and_absent_samples() {
+        // The Snapshot method (stats.rs L81-87) mirrors Stats::mean and is the
+        // one the reporter actually reads.
+        let mut s = Snapshot::default();
+        assert_eq!(s.mean_response_latency(), 0.0);
+        s.resp_latency_count = 2;
+        s.resp_latency_total_micros = 5_000_000;
+        assert!((s.mean_response_latency() - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn telemetry_includes_latency_when_samples_exist() {
+        // Reaching the final INCONCLUSIVE branch (stats.rs L325-331) with both
+        // responses and latency recorded exercises the full telemetry suffix
+        // including mean_resp_latency (L277-280).
+        let mut s = snap(10, 2, 0, 0); // error_share 0.2, peak 0, no 5xx
+        s.responses = 4;
+        s.status_2xx = 4;
+        s.resp_latency_count = 4;
+        s.resp_latency_total_micros = 8_000_000;
+        let (verdict, reason) = classify_verdict(&s);
+        assert_eq!(verdict, "INCONCLUSIVE");
+        assert!(reason.contains("responses=4"));
+        assert!(reason.contains("mean_resp_latency=2.00s"));
+    }
 }

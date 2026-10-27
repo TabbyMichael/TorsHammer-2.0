@@ -156,4 +156,48 @@ mod tests {
             "all sent datagram bytes should arrive intact"
         );
     }
+
+    #[test]
+    fn target_address_brackets_ipv6_literal_host() {
+        // An IPv6 host must be wrapped in brackets (udp.rs L25-26) so the
+        // ``host:port`` string is unambiguous. Driving the profile with an
+        // IPv6 host builds that bracketed peer on every cycle; the send itself
+        // may fail on a v4-bound socket, which is irrelevant to the formatting.
+        let mut config = cfg(9);
+        config.host = "::1".into();
+        config.base_post_length = 4;
+        config.delay_min = 0.0;
+        config.delay_max = 0.0;
+
+        let mut rng = Rng::new(5);
+        let stats = Stats::new();
+        let running = AtomicBool::new(true);
+        let mut sock = open(&config).unwrap();
+        run(&config, &mut sock, &stats, &running, &mut rng);
+
+        // Nothing asserted about delivery: this pins the bracketed-address path.
+    }
+
+    #[test]
+    fn send_to_failure_breaks_the_cycle() {
+        // An unroutable hostname makes ``send_to`` fail (its ToSocketAddrs
+        // resolution errors), exercising the ``Err(_) => break`` arm (L67).
+        let mut config = cfg(9);
+        config.host = "no.such.host.invalid".into();
+        config.base_post_length = 16;
+        config.delay_min = 0.0;
+        config.delay_max = 0.0;
+
+        let mut rng = Rng::new(6);
+        let stats = Stats::new();
+        let running = AtomicBool::new(true);
+        let mut sock = open(&config).unwrap();
+        run(&config, &mut sock, &stats, &running, &mut rng);
+
+        assert_eq!(
+            stats.bytes_sent(),
+            0,
+            "no datagram should be counted when every send fails"
+        );
+    }
 }

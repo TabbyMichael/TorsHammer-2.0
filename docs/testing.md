@@ -67,8 +67,9 @@ pytest --cov=src/torshammer --cov-report=html
 
 **Note:** Coverage is enabled automatically — `pytest-cov` is part of the `dev`
 extra (`pip install -e ".[dev]"`) and `pyproject.toml` wires
-`addopts = "--cov=src/torshammer --cov-report=term-missing --cov-fail-under=85"`,
-so a plain `pytest` run already measures coverage and **fails below 85%**.
+`addopts = "--cov=src/torshammer --cov-report=term-missing --cov-fail-under=100"`,
+so a plain `pytest` run already measures coverage and **fails below 100%**.
+See [Coverage policy](#coverage-policy) below.
 
 ## Test Structure
 
@@ -129,6 +130,25 @@ async def test_something(slow_server):
 async def test_socks5_handshake(fake_socks5):
     proxy = Proxy("socks5", "127.0.0.1", fake_socks5.port)
     # Test against fake_socks5
+```
+
+### FlakyServer Fixture
+
+**Purpose:** Exercises the per-profile error/dribble arms. Unlike `SlowServer`
+(a connection lives forever), `flaky_server` accepts a connection, reads up to a
+configurable byte budget, then **hard-closes mid-stream**. Every TCP profile's
+`except (ConnectionError, OSError)` reconnect/dribble branch fires against it,
+which is what drives profile error-path coverage in
+`tests/test_profiles_coverage.py`.
+
+**Location:** `tests/conftest.py`
+
+**Usage:**
+```python
+async def test_profile_survives_midstream_close(flaky_server):
+    cfg = _cfg(flaky_server, mode="slow-post", ...)
+    stats = await _drive(PROFILES["slow-post"], cfg, run_for=0.2)
+    assert stats.bytes_sent > 0
 ```
 
 ## Test Files
@@ -426,14 +446,14 @@ that, plus a manual `workflow_dispatch` trigger.
 
 Coverage is measured and **enforced on every `pytest` run**. `pyproject.toml`
 sets `addopts = "--cov=src/torshammer --cov-report=term-missing
---cov-fail-under=85"`, so the suite exits non-zero if line coverage drops below
-85%. `pytest-cov` ships with the `dev` extra, so no separate install is needed:
+--cov-fail-under=100"`, so the suite exits non-zero if line coverage drops below
+100%. `pytest-cov` ships with the `dev` extra, so no separate install is needed:
 
 ```bash
 # Install the development extras (pytest, pytest-asyncio, pytest-cov, mypy)
 pip install -e ".[dev]"
 
-# Coverage runs automatically with the suite and fails below 85%
+# Coverage runs automatically with the suite and fails below 100%
 pytest
 
 # Opt into an HTML report as well
@@ -445,6 +465,109 @@ xdg-open htmlcov/index.html  # Linux
 When working on a single module you can raise the bar or silence it for a local
 run with `pytest -o addopts=""` (skips the coverage gate) — but CI always
 enforces it.
+
+## Coverage policy
+
+The Python backend holds a **100% line-coverage** target on `src/torshammer`.
+Every line is either executed by the suite or carries a written, auditable
+justification. Two families of tests do most of the structural work:
+
+- **Mode-parametrized profile harness** (`tests/test_profiles_coverage.py`):
+  a single `@pytest.mark.parametrize` pass runs every TCP profile in
+  `settings.all_modes()` against the live `slow_server` fixture (success path)
+  and again against the `flaky_server` fixture (error/dribble path). Adding a
+  new mode automatically inherits coverage of the send/loop/except arms, so a
+  new profile cannot silently ship untested.
+- **Real end-to-end CLI + cluster tests** (`tests/test_main_e2e.py`,
+  `tests/test_cluster_edges.py`): these drive `torshammer.cli.main` and
+  `cluster.run_worker` for real rather than patching them out, so the entry
+  point, the RPC handler arms and the master/worker orchestration are genuinely
+  exercised.
+
+### Coverage exclusions
+
+Genuinely non-executable code is excluded with an inline
+`# pragma: no cover - <reason>` marker rather than being faked. Every exclusion
+is listed here so both backends stay auditable in one place.
+
+Python (`src/torshammer`):
+
+| Location | Lines | Reason |
+|---|---|---|
+| `cli.py` | `import resource` fallback | POSIX-only module; dead on the Windows interpreters this branch exists for |
+| `cluster.py` | `_install_stop_handler` `except` | `add_signal_handler` raises `NotImplementedError`/`RuntimeError` only on Windows |
+| `dispatch.py` | `return 0` after `os.execv` | on POSIX `execv` only returns on failure; the failure path is covered by a test |
+| `profiles.py` | H2 stream-id wraparound | reaching it needs ~2^31 streams in one run - a defensive overflow guard, not a reachable state |
+
+Rust (`rust/src`) exclusions are registered under [Coverage exclusions -
+Rust](#coverage-exclusions---rust) below.
+
+### Rust backend coverage
+
+The Rust engine is measured with [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)
+and held to **100% lines** on `rust/src`. Run it with the rustup toolchain on
+`PATH` to avoid the distro-toolchain corrupt-metadata (E0786) failure:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+cd rust
+cargo llvm-cov --all-targets --summary-only
+cargo llvm-cov --all-targets --show-missing-lines   # per-file uncovered lines
+cargo llvm-cov --all-targets --lcov --output-path target/llvm-cov/lcov.info
+```
+
+#### Enforcing the gate (why not `--fail-under-lines 100`)
+
+`make rust-cov` (and both CI configs) enforce the Rust line target with an
+**lcov-based zero-uncovered-line assertion** rather than
+`cargo llvm-cov --fail-under-lines 100`. The reason is a version-specific
+accounting quirk, verified against cargo-llvm-cov 0.9.1 / LLVM 21 on this tree:
+
+- The `lcov` export and `llvm-cov show` report **0** uncovered statement lines
+  for every file in `rust/src` (all executable lines are hit; functions are
+  100%; e.g. `engine/mod.rs` = 531 `DA:` records, **0** with a `0` count).
+- `llvm-cov report` — the metric `--fail-under-lines` reads — *additionally*
+  attributes **12** already-executed continuation / closing-brace lines
+  (`engine/mod.rs` 10, `main.rs` 2) as uncovered. Those lines are not even
+  statements in the `lcov`/`show` line model, so **no test can cover them and no
+  code restructure removes them** (verified: inlining generic bounds, hoisting
+  multi-line calls, and toggling the `#[cfg(not(coverage))]` monitor poll all
+  leave the count at 12; `--show-missing-lines` cannot enumerate them).
+
+This is a discrepancy internal to the toolchain (`show`/`lcov` agree at 100%,
+`report` lags at 99.79%), not a real gap in the suite. cargo-llvm-cov 0.9.1
+provides **no per-line/per-region exclude selector** — only whole-file
+`--ignore-filename-regex` and package-level `--exclude` — so the phantom lines
+cannot be excluded at line granularity without dropping ~1,280 genuinely covered
+lines from the two modules. Enforcing on the `lcov` model (the one that correctly
+counts every real statement) is therefore the honest gate. A `--fail-under-lines
+99` report tripwire is kept alongside it so a real regression (not the fixed 12
+phantoms) still fails CI.
+
+#### Coverage exclusions - Rust
+
+Platform-gated code that is simply not compiled on the measurement host never
+appears in the report (no marker needed) — e.g. the `#[cfg(not(unix))]` module in
+`engine/signals.rs` (L39) and the `#[cfg(unix)]` install path (L16).
+
+`#[cfg]`-independent, non-test-reachable regions are dropped from the
+instrumented build with `#[cfg(not(coverage))]` (cargo-llvm-cov injects
+`--cfg coverage`, so these compile out only under coverage yet stay live in
+production). `#![allow(unexpected_cfgs)]` in `main.rs` keeps `clippy -D warnings`
+clean about that external cfg. Registered sites:
+
+| File | Site | Reason |
+|---|---|---|
+| `engine/mod.rs` | monitor-loop mid-poll `shutdown_requested()` check | responsiveness-only Ctrl-C checkpoint; firing it needs a signal to land inside a 100ms window a bounded test cannot schedule. Interval-granular shutdown is covered by the post-loop check. |
+| `engine/profiles.rs` (L1023) | H2 `stream_id > 0x7FFF_FFF0` recycle | needs ~2^31 RST frames in one run — a defensive overflow guard, unreachable in the test budget |
+| `engine/profiles.rs` (L1233, L1316, L1323) | narrow `should_stop()` early-exits | the surrounding loop/write-abort path already drives the stop route; these micro-exits can't be scheduled deterministically |
+| `engine/profiles.rs` (L1293) | `Expect`-header defensive filter | forces a state the harness can't produce (custom `Expect` header colliding with the built one) |
+| `main.rs` (L501) | `process::exit(run())` in `fn main()` | would terminate the test runner; `main()` is exercised by the black-box `rust/tests/cli.rs` harness (`CARGO_BIN_EXE_…`), not in-process unit coverage |
+
+Additionally, the 12 `report`-model phantom lines (`engine/mod.rs` ×10,
+`main.rs` ×2) described above are accepted as a toolchain artifact and are the
+reason the gate is enforced on the `lcov` line model rather than `--fail-under-lines 100`.
+
 
 ## Troubleshooting Tests
 

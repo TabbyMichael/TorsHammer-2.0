@@ -74,6 +74,20 @@ jobs:
     - name: Test
       run: cargo test --manifest-path rust/Cargo.toml
 
+    - name: Install cargo-llvm-cov
+      uses: taiki-e/install-action@cargo-llvm-cov
+
+    - name: Coverage gate (rust/src, 100% lines via lcov)
+      # Gate on the lcov line model, not --fail-under-lines 100: cargo-llvm-cov
+      # 0.9.1's `report` model spuriously flags ~12 already-executed
+      # continuation/brace lines in engine/mod.rs + main.rs that show/lcov
+      # count as covered. See docs/testing.md "Rust backend coverage".
+      run: |
+        rustup component add llvm-tools-preview
+        mkdir -p rust/target/llvm-cov
+        cargo llvm-cov --manifest-path rust/Cargo.toml --all-targets --lcov --output-path rust/target/llvm-cov/lcov.info
+        python3 scripts/rust_cov_gate.py rust/target/llvm-cov/lcov.info
+
   yaml-sanity:
     # Cheap guard against the class of bug that broke .woodpecker.yml:
     # a CI config that no parser can read is worse than no config at all.

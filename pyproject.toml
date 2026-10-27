@@ -37,7 +37,7 @@ torshammer = ["py.typed", "banner.txt"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "--cov=src/torshammer --cov-report=term-missing --cov-fail-under=85"
+addopts = "--cov=src/torshammer --cov-report=term-missing --cov-fail-under=100"
 
 [tool.coverage.run]
 source = ["src/torshammer"]
